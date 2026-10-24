@@ -17,6 +17,13 @@ namespace PlanetbaseCoop
         public static string Mode => Get("COOP_TEST");
         public static bool IsTest => !string.IsNullOrEmpty(Mode);
 
+        // Mutation twins: COOP_MUT=name[,name] turns one protection off; its test must then fail.
+        public static bool Mut(string name)
+        {
+            var m = Get("COOP_MUT");
+            return !string.IsNullOrEmpty(m) && ("," + m + ",").Contains("," + name + ",");
+        }
+
         public static void Quit()
         {
             if (Get("COOP_KEEP_OPEN") == "1") return;

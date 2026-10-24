@@ -114,6 +114,14 @@ namespace PlanetbaseCoop.Sync
                         case StateKind.Buildable: ApplyBuild(BuildRec.Read(r)); break;
                         case StateKind.Resource: ApplyRes(ResRec.Read(r)); break;
                         case StateKind.Ship: ApplyShip(ShipRec.Read(r)); break;
+                        case StateKind.CharStats:
+                        {
+                            int id = r.ReadInt32();
+                            var v = new float[8];
+                            for (int j = 0; j < 8; j++) v[j] = r.ReadSingle();
+                            if (Registry.Find(Kind.Character, id) is Character ch) CharStats.Apply(ch, v);
+                            break;
+                        }
                     }
                     StatesApplied++;
                 }
@@ -200,6 +208,7 @@ namespace PlanetbaseCoop.Sync
 
         private static void ApplyRes(ResRec rec)
         {
+            if (TestEnv.Mut("no-res-states")) return;
             if (Registry.Find(Kind.Resource, rec.Id) is Resource r) ResourcePlaces.Apply(r, rec);
         }
 
@@ -256,6 +265,7 @@ namespace PlanetbaseCoop.Sync
                 }
             }
             Singleton<EnvironmentManager>.getInstance().update(0f);
+            Singleton<MessageLog>.getInstance().update(dt);   // the sim block that normally ticks it is skipped
         }
     }
 }

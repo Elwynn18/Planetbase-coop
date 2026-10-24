@@ -25,6 +25,8 @@ namespace PlanetbaseCoop.Net
         Bye = 15,
         Chat = 16,          // join/leave notices and chat lines
         TestProbe = 17,     // test bots only: world digests exchanged between bots
+        Settings = 18,      // host -> client: landing permissions, manufacture limits
+        GameMessage = 19,   // host -> client: a notification added to the host's message log
     }
 
     public static class Wire

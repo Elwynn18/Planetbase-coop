@@ -37,6 +37,7 @@ namespace PlanetbaseCoop
                 Snapshot.Patch(Harmony);
                 Mirror.Patch(Harmony);
                 Commands.Patch(Harmony);
+                Sync.Messages.Patch(Harmony);
                 TestBot.Init();
                 sReady = true;
                 Log.Info("Plugin ready");

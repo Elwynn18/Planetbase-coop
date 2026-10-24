@@ -9,7 +9,9 @@ Rules this follows (coop-anything playbook):
 - never write to the owner's install or Steam folders; check them after every run;
 - each copy has its own Proton prefix (own saves, own wineserver) and no steamclient.dll, so it
   cannot reach the owner's Steam client; the mod also blocks SteamAPI.Init in test mode;
-- copies run windowed and muted; on an X display without Xvfb they show as small windows;
+- copies run windowed and muted on a private Xvfb screen (never on the owner's desktop); the
+  launcher refuses to start without Xvfb. Rendering is WineD3D on Mesa's software GL, since the
+  owner's NVIDIA Vulkan driver cannot present to Xvfb;
 - only processes in our own prefixes are killed (wineserver -k per prefix).
 """
 import hashlib
@@ -167,6 +169,42 @@ def wineserver_kill(name):
         subprocess.call([str(ws), "-k"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+class VirtualScreen:
+    """A private Xvfb display for the game copies of one run."""
+
+    def __init__(self):
+        if not shutil.which("Xvfb"):
+            sys.exit("refusing to run: Xvfb is not installed (test copies must not open windows on the owner's desktop)")
+        self.num = None
+        for n in range(91, 140):
+            if not os.path.exists(f"/tmp/.X11-unix/X{n}") and not os.path.exists(f"/tmp/.X{n}-lock"):
+                self.num = n
+                break
+        if self.num is None:
+            sys.exit("no free X display number")
+        self.proc = subprocess.Popen(["Xvfb", f":{self.num}", "-screen", "0", "1280x1024x24", "-nolisten", "tcp", "-noreset"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        if not wait_for(lambda: os.path.exists(f"/tmp/.X11-unix/X{self.num}"), 10):
+            self.stop()
+            sys.exit("Xvfb did not start")
+        log(f"Xvfb on :{self.num} (pid {self.proc.pid})")
+
+    @property
+    def display(self):
+        return f":{self.num}"
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
+
+SCREEN = None
+
+
 def to_windows(path):
     return "Z:" + str(path).replace("/", "\\")
 
@@ -182,7 +220,18 @@ class Copy:
         self.player_log = self.run_dir / "player.log"
         self.proton_log = self.run_dir / "proton.log"
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("SteamAppId", "SteamGameId", "SteamOverlay", "STEAM_", "PROTON_", "WINE", "DXVK", "COOP_"))}
+               if not k.startswith(("SteamAppId", "SteamGameId", "SteamOverlay", "STEAM_", "PROTON_", "WINE", "DXVK", "COOP_",
+                                    "WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"))}
+        env.update({
+            "DISPLAY": SCREEN.display,              # private Xvfb, never the owner's desktop
+        })
+        if os.environ.get("COOP_RENDERER", "dxvk") == "wined3d":
+            # software OpenGL on Xvfb: measured far too slow for Planetbase 1.4 (no second frame in 10 min)
+            env.update({"PROTON_USE_WINED3D": "1", "__GLX_VENDOR_LIBRARY_NAME": "mesa", "LIBGL_ALWAYS_SOFTWARE": "1"})
+        env.update({
+            "COOP_LOWGFX": "1",
+            "COOP_NORENDER": "1",                   # software GL is far too slow for the game's renderer
+        })
         env.update({
             "STEAM_COMPAT_DATA_PATH": str(pfx_dir(name)),
             "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(fake_steam_dir()),
@@ -258,6 +307,14 @@ def tail(path, n=25):
 
 
 def run_copies(copies, timeout):
+    try:
+        return _run_copies(copies, timeout)
+    finally:
+        if SCREEN:
+            SCREEN.stop()
+
+
+def _run_copies(copies, timeout):
     if owner_game_running():
         sys.exit("refusing to run: the owner's own Planetbase is running")
     if not check_protected():
@@ -325,13 +382,20 @@ def main(argv):
         opts = dict(a.split("=", 1) for a in argv[3:] if "=" in a)
         names = [a for a in argv[3:] if "=" not in a]
         timeout = int(opts.pop("timeout", "240"))
+        global SCREEN
+        SCREEN = VirtualScreen()
         if what == "boot":
             ok = run_copies([Copy(names[0], "boot")], timeout)
         elif what == "pair":
             scen = opts.pop("scenario", "join")
             extra = {"COOP_SCENARIO": scen, "COOP_PORT": opts.pop("port", "47610")}
+            if "mut" in opts:
+                extra["COOP_MUT"] = opts.pop("mut")
+            client_extra = dict(extra)
+            if "fake_mod" in opts:
+                client_extra["COOP_FAKE_MOD"] = opts.pop("fake_mod")
             host = Copy(opts["host"], "host", extra)
-            client = Copy(opts["client"], "client", extra)
+            client = Copy(opts["client"], "client", client_extra)
             ok = run_copies([host, client], timeout)
         else:
             sys.exit(f"unknown run target {what}")

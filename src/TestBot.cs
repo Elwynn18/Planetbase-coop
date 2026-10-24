@@ -89,6 +89,20 @@ namespace PlanetbaseCoop
 
         // ------------------------------------------------------------ digests (what both sides compare)
         private static readonly Dictionary<int, object> sScratch = new Dictionary<int, object>();
+        private static readonly FieldInfo fMessages = AccessTools.Field(typeof(MessageLog), "mMessages");
+        private static readonly FieldInfo fTradeState = AccessTools.Field(typeof(MerchantShip), "mTradeState");
+        private static readonly FieldInfo fNeeded = AccessTools.Field(typeof(MerchantShip), "mNeededProducts");
+        private static readonly FieldInfo fCommission = AccessTools.Field(typeof(MerchantShip), "mCommission");
+        private static readonly FieldInfo fWinResult = AccessTools.Field(typeof(GuiMerchantWindow), "mResult");
+        private static readonly FieldInfo fWinMStock = AccessTools.Field(typeof(GuiMerchantWindow), "mMerchantStockAmounts");
+        private static readonly FieldInfo fWinMTrade = AccessTools.Field(typeof(GuiMerchantWindow), "mMerchantTradeAmounts");
+        private static readonly FieldInfo fWinBStock = AccessTools.Field(typeof(GuiMerchantWindow), "mBaseStockAmounts");
+        private static readonly FieldInfo fWinBTrade = AccessTools.Field(typeof(GuiMerchantWindow), "mBaseTradeAmounts");
+        private static Module sPad1, sPad2, sStorage;
+        private static Resource sMoved, sStored;
+        private static LandingShip sShip;
+        private static int sCharsBefore;
+        private static bool sMerchantWaiting;
 
         public static Dictionary<string, string> LocalDigest()
         {
@@ -113,8 +127,14 @@ namespace PlanetbaseCoop
                 var p = x.getGameObject()?.transform.position ?? Vector3.zero;
                 return $"{x.getId()}:{(int)h}:{hid}:{slot}:{p.x:F1}:{p.z:F1}";
             }));
+            Registry.Collect(Kind.Ship, sScratch);
+            d["ships"] = string.Join(";", sScratch.Values.Cast<Ship>().OrderBy(x => x.getId()).Select(x =>
+                $"{x.getId()}:{ShipRec.From(x).State}:{x.getTransform().position.x:F1}:{x.getTransform().position.y:F1}:{x.getTransform().position.z:F1}"));
+            d["msgs"] = string.Join("|", ((List<Message>)fMessages.GetValue(Singleton<MessageLog>.getInstance())).Select(m => m.getDescription()));
+            foreach (var kv in Settings.Read()) if (kv.Key.StartsWith("land.")) d[kv.Key] = kv.Value.ToString();
             var tm = Singleton<TimeManager>.getInstance();
             d["speed"] = tm.getTimeScale().ToString("F0");
+            d["dropped"] = sDropped;
             d["alert"] = ((int)Singleton<SecurityManager>.getInstance().getAlertState()).ToString();
             d["tod"] = Singleton<EnvironmentManager>.getInstance().getTimeIndicator().getValue().ToString("F3");
             return d;
@@ -202,6 +222,7 @@ namespace PlanetbaseCoop
                         sM1 = PlaceAndBuild("ModuleTypeOxygenGenerator", 1, sBase, 20f);
                         sM2 = PlaceAndBuild("ModuleTypeAirlock", 0, sM1 != null ? sM1.getPosition() : sBase, 16f);
                         if (sM1 != null && sM2 != null && Connection.canLink(sM1, sM2)) Module.linkModules(sM1, sM2, true);
+                        sStorage = PlaceAndBuild("ModuleTypeStorage", 0, sM2 != null ? sM2.getPosition() : sBase, 16f);
                         ForceBuildAll();
                         // some loose resources to carry around
                         for (int i = 0; i < 4; i++)
@@ -235,7 +256,82 @@ namespace PlanetbaseCoop
                     else Timeout(240, "joiner ready");
                     break;
                 case 5: // T1: worlds match after join
-                    if (WaitMatch(new[] { Kind.Module, Kind.Connection, Kind.Component, Kind.Character, Kind.Ship }, 30f, "join: same objects on both sides")) Next();
+                    if (WaitMatch(new[] { Kind.Module, Kind.Connection, Kind.Component, Kind.Character, Kind.Ship }, 30f, "join: same objects on both sides"))
+                    {
+                        Next();
+                        if (sScenario == "ships") { sStep = 20; }
+                    }
+                    break;
+                // ---------------------------------------------------- ships scenario
+                case 20: // landing pads, then a colonist ship
+                    if (First())
+                    {
+                        sPad1 = PlaceAndBuild("ModuleTypeLandingPad", 2, sBase, 30f);
+                        sPad2 = PlaceAndBuild("ModuleTypeLandingPad", 2, sPad1.getPosition(), 30f);
+                        sCharsBefore = Registry.Characters.Count;
+                        sShip = LandingShip.create<ColonistShip>(sPad1, LandingShip.Size.Regular);
+                        Log.Info("bot: colonist ship " + sShip.getId() + " coming");
+                        return;
+                    }
+                    if (sShip != null && !sShip.isDestroyed() && ShipRec.From(sShip).State >= (int)LandingShip.State.Landed)
+                    {
+                        var e = ParseEntries(Get(sRemote, "ships"));
+                        var mine = ShipRec.From(sShip);
+                        bool ok = e.TryGetValue(sShip.getId().ToString(), out var t) && Mathf.Abs(float.Parse(t[1]) - mine.Pos.x) < 1.5f &&
+                                  Mathf.Abs(float.Parse(t[3]) - mine.Pos.z) < 1.5f && Mathf.Abs(float.Parse(t[2]) - mine.Pos.y) < 1.5f;
+                        if (ok && sT - sRemoteAt < 1f) { Check("landing ship flew in and landed in the same place on the joiner", true, $"state host {mine.State} joiner {t[0]}"); Next(); }
+                        else Timeout(60, "landing ship position on the joiner");
+                    }
+                    else Timeout(150, "colonist ship landed on the host");
+                    break;
+                case 21: // its colonists exist once on each side
+                    if (Registry.Characters.Count > sCharsBefore && sStepT > 5f)
+                    {
+                        if (WaitMatch(new[] { Kind.Character }, 30f, "ship's new colonists exist once on each side (no duplicates)")) Next();
+                    }
+                    else Timeout(90, "ship's colonists spawned on the host");
+                    break;
+                case 22: // merchant ship on the second pad, the joiner trades with it
+                    if (First())
+                    {
+                        sShip = LandingShip.create<MerchantShip>(sPad2, LandingShip.Size.Regular);
+                        sMerchantWaiting = true;
+                        return;
+                    }
+                    if (sMerchantWaiting && sShip is MerchantShip ms && ms.canTrade())
+                    {
+                        sMerchantWaiting = false;
+                        sStepT = 0f;
+                        SendProbe("do", "trade " + ms.getId());
+                        return;
+                    }
+                    if (!sMerchantWaiting)
+                    {
+                        var m = (MerchantShip)sShip;
+                        bool agreed = Convert.ToInt32(fTradeState.GetValue(m)) == 1 && fNeeded.GetValue(m) != null;
+                        if (agreed) { Check("joiner's trade is agreed on the host (colonists start loading)", true, ((ProductAmounts)fNeeded.GetValue(m)).getTotalAmount() + " items to deliver"); Next(); }
+                        else Timeout(20, "joiner's trade agreed on the host");
+                    }
+                    else Timeout(150, "merchant ship ready to trade");
+                    break;
+                case 23: // notifications reach the joiner
+                    if (First()) { Singleton<MessageLog>.getInstance().addMessage(new Message("coop test notice 42", ResourceList.StaticIcons.MessageAlert, 0)); return; }
+                    if (Get(sRemote, "msgs").Contains("coop test notice 42")) { Check("host notification shown on the joiner", true); Next(); }
+                    else Timeout(10, "host notification shown on the joiner");
+                    break;
+                case 24: // landing permissions: joiner edits, host follows; host edits, joiner follows
+                    if (First()) { SendProbe("do", "toggle-merchants"); return; }
+                    if (!Singleton<LandingShipManager>.getInstance().getLandingPermissions().getMerchantRefBool().get())
+                    {
+                        Singleton<LandingShipManager>.getInstance().getLandingPermissions().getVisitorRefBool().set(false);
+                        Check("joiner's landing permission change reaches the host", true);
+                        Next();
+                    }
+                    else Timeout(10, "joiner's landing permission change reaches the host");
+                    break;
+                case 25:
+                    if (Get(sRemote, "land.visitors") == "0") { Check("host's landing permission change reaches the joiner", true); sStep = 14; sEntered = false; sStepT = 0; }
+                    else Timeout(10, "host's landing permission change reaches the joiner");
                     break;
                 case 6: // T2: host builds a module, joiner sees it
                     if (First())
@@ -285,14 +381,34 @@ namespace PlanetbaseCoop
                     break;
                 case 11: // T7: colonists move on the joiner like on the host
                     if (First()) { sCharsAtStart = ParseEntries(Get(LocalDigest(), "chars")); return; }
-                    if (WaitCharsMatch(40f)) Next();
+                    if (WaitCharsMatch(60f)) Next();
                     break;
-                case 12: // T8: resources (positions and holders) match
-                    if (WaitResourcesMatch(30f)) Next();
+                case 12: // T8: resources (positions and holders) match after the host moves one and stores another
+                    if (First())
+                    {
+                        Registry.Collect(Kind.Resource, sScratch);
+                        var ground = sScratch.Values.Cast<Resource>().Where(x => { ResourcePlaces.Where(x, out var h, out _, out _); return h == Holder.None && x.getState() == Resource.State.Idle; }).ToList();
+                        sMoved = ground.FirstOrDefault();
+                        sStored = ground.Skip(1).FirstOrDefault();
+                        if (sMoved != null) sMoved.setPosition(sMoved.getPosition() + new Vector3(4f, 0f, 3f));
+                        var slot = sStorage?.findStorageSlot(sStorage.getPosition());
+                        if (sStored != null && slot != null) slot.addResource(sStored);
+                        Log.Info($"bot: moved resource {sMoved?.getId()}, stored {sStored?.getId()} (slot {(slot != null)})");
+                        if (sMoved == null || sStored == null || slot == null) { Check("resource test setup (2 loose resources, a storage slot)", false); Finish(); }
+                        return;
+                    }
+                    if (sStepT > 1f && WaitResourcesMatch(30f, sMoved.getId(), sStored.getId())) Next();
                     break;
                 case 13: // T9: census repairs a missing object (drop one on the joiner on purpose)
                     if (First()) { SendProbe("do", "drop-a-resource"); return; }
-                    if (sStepT > 2f && WaitMatch(new[] { Kind.Resource }, 20f, "census restores an object the joiner lost")) Next();
+                    {
+                        string dropped = Get(sRemote, "dropped");
+                        if (dropped == "") { Timeout(10, "joiner dropped a resource for the census test"); break; }
+                        if (dropped == "none") { Check("joiner dropped a resource for the census test", false); Finish(); break; }
+                        bool back = ("," + Get(sRemote, "ids.Resource") + ",").Contains("," + dropped + ",");
+                        if (back && WaitMatch(new[] { Kind.Resource }, 20f, "census restores the resource the joiner lost (id " + dropped + ")")) Next();
+                        else Timeout(20, "census restores the resource the joiner lost (id " + dropped + ")");
+                    }
                     break;
                 case 14: // T10: joiner leaves; host keeps running
                     if (First()) { SendProbe("end", ""); return; }
@@ -364,20 +480,20 @@ namespace PlanetbaseCoop
                 if (sCharsAtStart != null && sCharsAtStart.TryGetValue(kv.Key, out var s0))
                 {
                     float mx = float.Parse(kv.Value[0]) - float.Parse(s0[0]), mz = float.Parse(kv.Value[1]) - float.Parse(s0[1]);
-                    if (mx * mx + mz * mz > 1f) moved++;
+                    if (mx * mx + mz * mz > 64f) moved++;   // walked 8 m or more during the step
                 }
                 if (!theirs.TryGetValue(kv.Key, out var t)) { far++; continue; }
                 float dx = float.Parse(kv.Value[0]) - float.Parse(t[0]), dz = float.Parse(kv.Value[1]) - float.Parse(t[1]);
                 worst = Mathf.Max(worst, Mathf.Sqrt(dx * dx + dz * dz));
                 if (dx * dx + dz * dz > 25f || kv.Value[2] != t[2]) far++;
             }
-            string name = "colonists are where the host has them (within 5 m, some walked)";
+            string name = "colonists are where the host has them (within 5 m, one walked 8 m+)";
             if (mine.Count > 0 && far == 0 && moved > 0 && sT - sRemoteAt < 1f) { Check(name, true, $"{mine.Count} characters, {moved} moved, worst {worst:F1} m"); return true; }
             if (sStepT >= timeout) { Check(name, false, $"{far} of {mine.Count} off, {moved} moved, worst {worst:F1} m"); return true; }
             return false;
         }
 
-        private static bool WaitResourcesMatch(float timeout)
+        private static bool WaitResourcesMatch(float timeout, params int[] mustMatch)
         {
             var mine = ParseEntries(Get(LocalDigest(), "res"));
             var theirs = ParseEntries(Get(sRemote, "res"));
@@ -391,7 +507,13 @@ namespace PlanetbaseCoop
                 float dx = float.Parse(kv.Value[3]) - float.Parse(t[3]), dz = float.Parse(kv.Value[4]) - float.Parse(t[4]);
                 if (!sameHolder || (onGround && dx * dx + dz * dz > 1f)) { off++; example = example ?? $"{kv.Key} host {string.Join(":", kv.Value)} joiner {string.Join(":", t)}"; }
             }
-            if (mine.Count > 0 && off == 0 && sT - sRemoteAt < 2f) { Check("resources have the same holder and place", true, mine.Count + " resources"); return true; }
+            foreach (var id in mustMatch)
+            {
+                // the two resources the host just moved/stored: the joiner must show the new place
+                if (!theirs.TryGetValue(id.ToString(), out var t) || !mine.TryGetValue(id.ToString(), out var m)) { off++; continue; }
+                if (t[0] != m[0] || t[1] != m[1] || t[2] != m[2] || Mathf.Abs(float.Parse(t[3]) - float.Parse(m[3])) > 0.5f || Mathf.Abs(float.Parse(t[4]) - float.Parse(m[4])) > 0.5f) off++;
+            }
+            if (mine.Count > 0 && off == 0 && sT - sRemoteAt < 1f) { Check("resources have the same holder and place", true, mine.Count + " resources, incl. one moved and one stored by the host"); return true; }
             if (sStepT >= timeout) { Check("resources have the same holder and place", false, $"{off} of {mine.Count} off, e.g. {example}"); return true; }
             return false;
         }
@@ -475,6 +597,7 @@ namespace PlanetbaseCoop
         private static float sCStepT, sDigestTimer;
         private static bool sClientEnd;
         private static readonly Queue<string> sClientQueue = new Queue<string>();
+        private static string sDropped = "";
         private static readonly FieldInfo fActiveModule = AccessTools.Field(typeof(GameStateGame), "mActiveModule");
         private static readonly MethodInfo mPlaceModule = AccessTools.Method(typeof(GameStateGame), "placeModule");
         private static readonly MethodInfo mIncreaseSpeed = AccessTools.Method(typeof(GameStateGame), "increaseSpeed");
@@ -571,11 +694,40 @@ namespace PlanetbaseCoop
                 case "faster":
                     mIncreaseSpeed.Invoke(game, null);
                     break;
+                case "trade":
+                {
+                    var ship = Registry.Find(Kind.Ship, int.Parse(a[1])) as MerchantShip;
+                    if (ship == null) { Log.Warn("bot: no merchant ship " + a[1]); break; }
+                    var win = new GuiMerchantWindow(ship);
+                    var mStock = (ProductAmounts)fWinMStock.GetValue(win);
+                    var mTrade = (ProductAmounts)fWinMTrade.GetValue(win);
+                    var bStock = (ProductAmounts)fWinBStock.GetValue(win);
+                    var bTrade = (ProductAmounts)fWinBTrade.GetValue(win);
+                    ProductAmount buy = null;
+                    foreach (var p in mStock.clone()) if (p.getAmount() > 0) { buy = p; break; }
+                    if (buy != null) { mStock.remove(buy.getProduct(), 1); mTrade.add(buy.getProduct(), 1); }
+                    float need = mTrade.getValue() * (1f + (int)fCommission.GetValue(ship) / 100f) + 1f;
+                    foreach (var pa in bStock.clone())
+                        for (int i = 0; i < pa.getAmount() && bTrade.getValue() < need; i++)
+                            if (pa.getProduct().markForTrading(ship)) { bStock.remove(pa.getProduct(), 1); bTrade.add(pa.getProduct(), 1); }
+                    Log.Info($"bot: trading {mTrade.getTotalAmount()} for {bTrade.getTotalAmount()} (value {bTrade.getValue()} vs {need:F0})");
+                    fWinResult.SetValue(win, Enum.ToObject(fWinResult.FieldType, 0));   // Trade
+                    win.destroy();
+                    break;
+                }
+                case "toggle-merchants":
+                {
+                    var rb = Singleton<LandingShipManager>.getInstance().getLandingPermissions().getMerchantRefBool();
+                    rb.set(!rb.get());   // what the window's checkbox does
+                    break;
+                }
                 case "drop-a-resource":
                 {
                     Registry.Collect(Kind.Resource, sScratch);
-                    var r = sScratch.Values.Cast<Resource>().FirstOrDefault(x => { ResourcePlaces.Where(x, out var h, out _, out _); return h == Holder.None; });
-                    if (r != null) { Log.Info("bot: destroying resource " + r.getId() + " locally"); r.destroy(); }
+                    var r = sScratch.Values.Cast<Resource>().FirstOrDefault(x => { ResourcePlaces.Where(x, out var h, out _, out _); return h == Holder.None; })
+                            ?? sScratch.Values.Cast<Resource>().FirstOrDefault();
+                    if (r != null) { Log.Info("bot: destroying resource " + r.getId() + " locally"); sDropped = r.getId().ToString(); ResourcePlaces.Release(r); r.destroy(); }
+                    else sDropped = "none";
                     break;
                 }
             }

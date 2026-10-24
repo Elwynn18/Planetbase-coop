@@ -23,6 +23,17 @@ namespace PlanetbaseCoop
             Screen.SetResolution(Width, Height, FullScreenMode.Windowed);
             Application.runInBackground = true;
             AudioListener.volume = 0f;
+            if (TestEnv.Get("COOP_LOWGFX") == "1")
+            {
+                // software rendering on Xvfb: cheapest settings
+                QualitySettings.SetQualityLevel(0, true);
+                QualitySettings.vSyncCount = 0;
+                QualitySettings.antiAliasing = 0;
+                QualitySettings.shadows = ShadowQuality.Disable;
+                Application.targetFrameRate = 30;
+                harmony.Patch(AccessTools.Method(typeof(GameManager), nameof(GameManager.initQualitySettings)),
+                    postfix: new HarmonyMethod(typeof(TestSetup), nameof(LowQuality)));
+            }
             Log.Info($"Test mode: windowed {Width}x{Height}, muted, runInBackground");
         }
 
@@ -33,9 +44,47 @@ namespace PlanetbaseCoop
             return false;
         }
 
+        private static void LowQuality()
+        {
+            QualitySettings.SetQualityLevel(0, true);
+            QualitySettings.vSyncCount = 0;
+            QualitySettings.antiAliasing = 0;
+            QualitySettings.shadows = ShadowQuality.Disable;
+        }
+
+        private static float sFpsTimer;
+        private static int sFpsFrames;
+
+        private static readonly System.Collections.Generic.HashSet<int> sStripped = new System.Collections.Generic.HashSet<int>();
+
+        // COOP_NORENDER=1 (virtual screen, software GL): cameras draw nothing and their image effects
+        // are off. The game's logic, including code that uses Camera.main, still runs.
+        private static void StripCameras()
+        {
+            foreach (var cam in Camera.allCameras)
+            {
+                if (cam == null) continue;
+                cam.cullingMask = 0;
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                if (sStripped.Add(cam.GetInstanceID()) || Time.frameCount % 120 == 0)
+                {
+                    foreach (var b in cam.GetComponents<Behaviour>())
+                        if (b != cam && b.enabled) b.enabled = false;
+                }
+            }
+        }
+
         public static void Update()
         {
             if (AudioListener.volume != 0f) AudioListener.volume = 0f;
+            if (TestEnv.Get("COOP_NORENDER") == "1") StripCameras();
+            sFpsFrames++;
+            sFpsTimer += Time.unscaledDeltaTime;
+            if (sFpsTimer >= 10f)
+            {
+                Log.Info($"fps {sFpsFrames / sFpsTimer:F1} state {GameAccess.CurrentState()?.GetType().Name}");
+                sFpsTimer = 0f; sFpsFrames = 0;
+            }
         }
     }
 }

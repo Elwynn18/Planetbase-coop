@@ -135,6 +135,32 @@ namespace PlanetbaseCoop.Sync
             }
         }
 
+        // Any game object that writes itself with Serialization.* -> XML string, and back.
+        public static string XmlOut(Action<XmlNode> write)
+        {
+            if (fDocument.GetValue(null) != null) throw new InvalidOperationException("serializer busy");
+            var doc = new XmlDocument();
+            fDocument.SetValue(null, doc);
+            try
+            {
+                XmlNode root = doc.AppendChild(doc.CreateElement("coop"));
+                write(root);
+                return root.OuterXml;
+            }
+            finally { fDocument.SetValue(null, null); }
+        }
+
+        public static void XmlIn(string xml, Action<XmlNode> read)
+        {
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+            object prevDoc = fDocument.GetValue(null), prevIds = fIds.GetValue(null);
+            fDocument.SetValue(null, doc);
+            fIds.SetValue(null, new HashSet<int>());
+            try { read(doc.DocumentElement); }
+            finally { fDocument.SetValue(null, prevDoc); fIds.SetValue(null, prevIds); }
+        }
+
         // ------------------------------------------------------------------ XML in (joiner)
         // Returns the created object, or null when it already exists or can't be created yet
         // (missing parent or link); `missing` says what is missing.

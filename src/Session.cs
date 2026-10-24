@@ -53,6 +53,7 @@ namespace PlanetbaseCoop
             Role = Role.Host;
             Peers.Clear();
             WorldSync.Reset();
+            Settings.Reset();
             Application.runInBackground = true;   // the host must keep simulating when alt-tabbed
             Status = "Hosting (" + t.Describe + ")";
             Log.Info("Hosting: " + t.Describe + ", " + VersionInfo.Local);
@@ -68,6 +69,7 @@ namespace PlanetbaseCoop
             Phase = ClientPhase.Connecting;
             LastRefusal = null;
             WorldApply.Reset();
+            Settings.Reset();
             sQueuedWhileLoading.Clear();
             Application.runInBackground = true;
             Status = "Connecting (" + t.Describe + ")";
@@ -223,7 +225,11 @@ namespace PlanetbaseCoop
         {
             if (GameAccess.Game() == null) { Stop("host left the colony"); return; }
             var ready = ReadyPeers.ToList();
-            if (ready.Count > 0) WorldSync.Tick(dt, Transport, null, ready);
+            if (ready.Count > 0)
+            {
+                WorldSync.Tick(dt, Transport, null, ready);
+                Settings.HostTick(dt, Transport, ready);
+            }
             foreach (var p in Peers.Values.ToList())
             {
                 if (sClock - p.LastHeard > 30f)
@@ -246,7 +252,7 @@ namespace PlanetbaseCoop
         {
             sHostLastHeard = sClock;
             var r = Wire.Reader(data, out var type);
-            if (Phase == ClientPhase.Loading && (type == Msg.Created || type == Msg.Destroyed || type == Msg.States || type == Msg.Globals))
+            if (Phase == ClientPhase.Loading && (type == Msg.Created || type == Msg.Destroyed || type == Msg.States || type == Msg.Globals || type == Msg.Settings || type == Msg.GameMessage))
             {
                 sQueuedWhileLoading.Add(data);
                 return;
@@ -285,6 +291,8 @@ namespace PlanetbaseCoop
                 case Msg.Destroyed: WorldApply.OnDestroyed(r); break;
                 case Msg.States: WorldApply.OnStates(r); break;
                 case Msg.Globals: Globals.Apply(r); break;
+                case Msg.Settings: Settings.OnSettings(r); break;
+                case Msg.GameMessage: Messages.OnMessage(r); break;
                 case Msg.CommandResult: Commands.OnResult(r); break;
                 case Msg.Chat: Ui.Toast(r.ReadString()); break;
                 case Msg.Pong: break;
@@ -313,8 +321,9 @@ namespace PlanetbaseCoop
             if (Phase == ClientPhase.Mirroring)
             {
                 if (GameAccess.Game() == null) { Stop("left the colony"); return; }
+                Settings.ClientTick(dt);
                 sCensusTimer += dt;
-                if (sCensusTimer >= 5f)
+                if (sCensusTimer >= 5f && !TestEnv.Mut("no-census"))
                 {
                     sCensusTimer = 0f;
                     Transport.Send(0, Census.Build());

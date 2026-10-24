@@ -16,6 +16,8 @@ namespace PlanetbaseCoop.Sync
         private static readonly Dictionary<int, BuildRec> sBuildSent = new Dictionary<int, BuildRec>();
         private static readonly Dictionary<int, ResRec> sResSent = new Dictionary<int, ResRec>();
         private static readonly Dictionary<int, ShipRec> sShipSent = new Dictionary<int, ShipRec>();
+        private static float sStatTimer;
+        private static readonly Dictionary<int, float[]> sStatSent = new Dictionary<int, float[]>();
         private static float sLifeTimer, sCharTimer, sBuildTimer, sResTimer, sKeyTimer, sGlobalTimer;
         public static int CreatesSent, DestroysSent;
 
@@ -50,6 +52,8 @@ namespace PlanetbaseCoop.Sync
             if (sBuildTimer >= 0.5f || key) { sBuildTimer = 0f; SendBuilds(t, readyPeers, key); }
             if (sResTimer >= 0.2f || key) { sResTimer = 0f; SendResources(t, readyPeers, key); }
             if (sGlobalTimer >= 0.5f) { sGlobalTimer = 0f; Send(t, readyPeers, Globals.Build()); }
+            sStatTimer += dt;
+            if (sStatTimer >= 1f) { sStatTimer = 0f; SendStats(t, readyPeers); }
         }
 
         private static void Send(ITransport t, IEnumerable<int> peers, byte[] msg)
@@ -69,6 +73,7 @@ namespace PlanetbaseCoop.Sync
                 foreach (var kv in sScratch)
                 {
                     if (pub.Contains(kv.Key)) continue;
+                    if (TestEnv.Mut("no-lifecycle")) continue;
                     var msg = CreatedMsg(k, kv.Key, kv.Value);
                     if (msg != null) { created.Add(msg); pub.Add(kv.Key); }
                 }
@@ -143,6 +148,7 @@ namespace PlanetbaseCoop.Sync
         // ---------------------------------------------------------------- states
         private static void SendChars(ITransport t, IEnumerable<int> peers, bool all)
         {
+            if (TestEnv.Mut("no-char-states")) return;
             Registry.Collect(Kind.Character, sScratch);
             var recs = new List<CharRec>();
             foreach (var kv in sScratch)
@@ -181,6 +187,26 @@ namespace PlanetbaseCoop.Sync
                 w.Write((byte)StateKind.Buildable);
                 w.Write(recs.Count);
                 foreach (var rec in recs) rec.Write(w);
+            }));
+        }
+
+        private static void SendStats(ITransport t, IEnumerable<int> peers)
+        {
+            Registry.Collect(Kind.Character, sScratch);
+            var changed = new List<(int, float[])>();
+            foreach (var kv in sScratch)
+            {
+                var v = CharStats.Read((Character)kv.Value);
+                if (sStatSent.TryGetValue(kv.Key, out var last) && CharStats.Same(last, v)) continue;
+                sStatSent[kv.Key] = v;
+                changed.Add((kv.Key, v));
+            }
+            if (changed.Count == 0) return;
+            Send(t, peers, Wire.Build(Msg.States, w =>
+            {
+                w.Write((byte)StateKind.CharStats);
+                w.Write(changed.Count);
+                foreach (var (id, v) in changed) { w.Write(id); foreach (var f in v) w.Write(f); }
             }));
         }
 
@@ -225,5 +251,31 @@ namespace PlanetbaseCoop.Sync
         }
     }
 
-    public enum StateKind : byte { Character = 1, Buildable = 2, Resource = 3, Ship = 4 }
+    public enum StateKind : byte { Character = 1, Buildable = 2, Resource = 3, Ship = 4, CharStats = 5 }
+
+    // A character's 8 indicators (health, nutrition, hydration, oxygen, sleep, morale, condition, integrity).
+    public static class CharStats
+    {
+        private static readonly System.Reflection.FieldInfo fIndicators = HarmonyLib.AccessTools.Field(typeof(Character), "mIndicators");
+
+        public static float[] Read(Character c)
+        {
+            var ind = (Indicator[])fIndicators.GetValue(c);
+            var v = new float[8];
+            for (int i = 0; i < 8; i++) v[i] = ind[i] != null ? ind[i].getValue() : -1f;
+            return v;
+        }
+
+        public static bool Same(float[] a, float[] b)
+        {
+            for (int i = 0; i < 8; i++) if (UnityEngine.Mathf.Abs(a[i] - b[i]) > 0.005f) return false;
+            return true;
+        }
+
+        public static void Apply(Character c, float[] v)
+        {
+            var ind = (Indicator[])fIndicators.GetValue(c);
+            for (int i = 0; i < 8; i++) if (ind[i] != null && v[i] >= 0f) ind[i].setValue(v[i]);
+        }
+    }
 }

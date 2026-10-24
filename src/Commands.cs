@@ -13,7 +13,7 @@ namespace PlanetbaseCoop
     public enum Cmd : byte
     {
         PlaceModule = 1, Link = 2, PlaceComponent = 3, Recycle = 4, SetEnabled = 5, SetPriority = 6,
-        Speed = 7, Alert = 8, ProducedItem = 9,
+        Speed = 7, Alert = 8, ProducedItem = 9, Settings = 10, Trade = 11,
     }
 
     // Joiner: the game's commit points are intercepted and sent to the host.
@@ -46,6 +46,7 @@ namespace PlanetbaseCoop
             Pre(h, AccessTools.Method(typeof(GameStateGame), "decreaseSpeed"), nameof(SlowerPrefix));
             Pre(h, AccessTools.Method(typeof(SecurityManager), nameof(SecurityManager.setAlertState)), nameof(AlertPrefix));
             Pre(h, AccessTools.Method(typeof(ConstructionComponent), nameof(ConstructionComponent.setProducedItemIndex)), nameof(ProducedPrefix));
+            Pre(h, AccessTools.Method(typeof(GuiMerchantWindow), nameof(GuiMerchantWindow.destroy)), nameof(TradeWindowClosePrefix));
         }
 
         private static void Pre(Harmony h, MethodInfo m, string prefix)
@@ -58,6 +59,7 @@ namespace PlanetbaseCoop
 
         public static void Send(Cmd cmd, Action<BinaryWriter> body)
         {
+            if (TestEnv.Mut("no-commands")) return;
             Sent++;
             Session.SendCommand(Wire.Build(Msg.Command, w => { w.Write((byte)cmd); body?.Invoke(w); }));
             Log.Info("command sent: " + cmd);
@@ -162,6 +164,53 @@ namespace PlanetbaseCoop
             int id = __instance.getId();
             Send(Cmd.ProducedItem, w => { w.Write(id); w.Write(index); });
             return true;   // show it at once; the host's record confirms
+        }
+
+        private static readonly FieldInfo fTradeResult = AccessTools.Field(typeof(GuiMerchantWindow), "mResult");
+        private static readonly FieldInfo fTradeShip = AccessTools.Field(typeof(GuiMerchantWindow), "mMerchantShip");
+        private static readonly FieldInfo fBaseTrade = AccessTools.Field(typeof(GuiMerchantWindow), "mBaseTradeAmounts");
+        private static readonly FieldInfo fMerchantTrade = AccessTools.Field(typeof(GuiMerchantWindow), "mMerchantTradeAmounts");
+        private static readonly MethodInfo mCancelTrade = AccessTools.Method(typeof(GuiMerchantWindow), "cancelTrade");
+
+        // The merchant window marks resources while you browse and commits in destroy(). On a joiner
+        // the browsing stays local; the final basket goes to the host, which replays the trade.
+        private static bool TradeWindowClosePrefix(GuiMerchantWindow __instance)
+        {
+            if (!Joiner) return true;
+            int result = Convert.ToInt32(fTradeResult.GetValue(__instance));   // 0 Trade, 1 Dismiss, 2 Cancel
+            var ship = (MerchantShip)fTradeShip.GetValue(__instance);
+            var baseTrade = (ProductAmounts)fBaseTrade.GetValue(__instance);
+            var merchantTrade = (ProductAmounts)fMerchantTrade.GetValue(__instance);
+            if (result != 2 && ship != null)
+            {
+                string xb = Registry.XmlOut(root => baseTrade.serialize(root, "base"));
+                string xm = Registry.XmlOut(root => merchantTrade.serialize(root, "merchant"));
+                int id = ship.getId();
+                Send(Cmd.Trade, w => { w.Write(id); w.Write(result); w.Write(xb); w.Write(xm); });
+            }
+            mCancelTrade.Invoke(__instance, null);   // undo the local marks
+            Singleton<TimeManager>.getInstance().unpause();
+            return false;
+        }
+
+        private static string ExecuteTrade(BinaryReader r)
+        {
+            var ship = Registry.Find(Kind.Ship, r.ReadInt32()) as MerchantShip;
+            int result = r.ReadInt32();
+            string xb = r.ReadString(), xm = r.ReadString();
+            if (ship == null) return "The merchant ship has left.";
+            if (result == 1) { ship.dismiss(); return null; }
+            if (!ship.canTrade()) return "Someone else is trading with this ship right now.";
+            var baseTrade = new ProductAmounts();
+            var merchantTrade = new ProductAmounts();
+            Registry.XmlIn(xb, root => baseTrade.deserialize(root.FirstChild));
+            Registry.XmlIn(xm, root => merchantTrade.deserialize(root.FirstChild));
+            ship.startTrading();
+            foreach (var pa in baseTrade)
+                for (int i = 0; i < pa.getAmount(); i++)
+                    if (!pa.getProduct().markForTrading(ship)) { ship.cancelTrading(); Resource.unmarkForTrading(ship.getId()); return "The base no longer has what you offered."; }
+            ship.onTradeAgreed(baseTrade, merchantTrade);
+            return null;
         }
 
         public static bool KindOf(Selectable s, out Kind kind)
@@ -301,6 +350,10 @@ namespace PlanetbaseCoop
                     Singleton<SecurityManager>.getInstance().setAlertState((AlertState)r.ReadInt32());
                     return null;
                 }
+                case Cmd.Settings:
+                    return Settings.OnCommand(r);
+                case Cmd.Trade:
+                    return ExecuteTrade(r);
                 case Cmd.ProducedItem:
                 {
                     var cc = Registry.Find(Kind.Component, r.ReadInt32()) as ConstructionComponent;
