@@ -1,0 +1,6 @@
+out/
+.cache/
+src/obj/
+src/bin/
+*.log
+test/lab.json
