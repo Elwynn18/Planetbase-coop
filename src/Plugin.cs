@@ -15,6 +15,7 @@ namespace PlanetbaseCoop
 
         public static Plugin Instance;
         public static Harmony Harmony;
+        private static bool sReady;
 
         private void Awake()
         {
@@ -33,6 +34,11 @@ namespace PlanetbaseCoop
                     SteamBlock.Apply(Harmony);
                     TestSetup.Apply(Harmony);
                 }
+                Snapshot.Patch(Harmony);
+                Mirror.Patch(Harmony);
+                Commands.Patch(Harmony);
+                TestBot.Init();
+                sReady = true;
                 Log.Info("Plugin ready");
                 if (TestEnv.Mode == "boot") TestEnv.WriteStatus("BOOT: plugin loaded");
             }
@@ -48,19 +54,50 @@ namespace PlanetbaseCoop
 
         private void Update()
         {
-            if (!TestEnv.IsTest) return;
-            TestSetup.Update();
-            if (TestEnv.Mode == "boot")
+            if (!sReady) return;
+            float dt = Time.unscaledDeltaTime;
+            try
             {
-                mBootTimer += Time.unscaledDeltaTime;
-                var state = GameAccess.CurrentState();
-                if (!mBootDone && state != null && state.isTitleState() && mBootTimer > 3f)
+                Ui.Update();
+                SteamTransport.Update();
+                Session.Update(dt);
+                if (TestEnv.IsTest)
                 {
-                    mBootDone = true;
-                    TestEnv.WriteStatus($"BOOT: title screen reached, state={state.GetType().Name}, steamInitBlocked={SteamBlock.InitBlocked}, screen={Screen.width}x{Screen.height} fullscreen={Screen.fullScreen}");
-                    TestEnv.WriteStatus("RESULT: PASS boot");
-                    TestEnv.Quit();
+                    TestSetup.Update();
+                    TestBot.Update(dt);
+                    BootCheck(dt);
                 }
+            }
+            catch (Exception e)
+            {
+                Log.Error("Update: " + e);
+            }
+        }
+
+        private void OnGUI()
+        {
+            if (!sReady) return;
+            try { Ui.OnGUI(); }
+            catch (Exception e) { Log.Error("OnGUI: " + e); }
+        }
+
+        private void OnApplicationQuit()
+        {
+            Session.Stop("game closed");
+        }
+
+        private void BootCheck(float dt)
+        {
+            if (TestEnv.Mode != "boot" || mBootDone) return;
+            mBootTimer += dt;
+            var state = GameAccess.CurrentState();
+            if (state != null && state.isTitleState() && mBootTimer > 3f)
+            {
+                mBootDone = true;
+                TestEnv.WriteStatus($"BOOT: title screen reached, state={state.GetType().Name}, steamInitBlocked={SteamBlock.InitBlocked}, screen={Screen.width}x{Screen.height} fullscreen={Screen.fullScreen}");
+                TestEnv.WriteStatus("BOOT: versions " + VersionInfo.Local);
+                TestEnv.WriteStatus("RESULT: PASS boot");
+                TestEnv.Quit();
             }
         }
     }

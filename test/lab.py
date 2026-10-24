@@ -270,7 +270,7 @@ def run_copies(copies, timeout):
             c.start()
             if i + 1 < len(copies):
                 # let the first copy reach its menu before the next starts (CPU, shader cache)
-                wait_for(lambda: any("READY" in l or "RESULT:" in l for l in c.lines()), 120)
+                wait_for(lambda: any("READY" in l or "RESULT:" in l for l in c.lines()) or not c.alive(), 420)
         while time.time() - t0 < timeout:
             res = [c.result() for c in copies]
             if all(res):
