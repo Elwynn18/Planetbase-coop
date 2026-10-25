@@ -10,15 +10,20 @@ using UnityEngine;
 
 namespace PlanetbaseCoop.Sync
 {
-    // Placement previews ("ghost" buildings). While a player places a module, the others see its
-    // preview (type, size, place, green/red) with the player's name above it.
+    // Placement previews ("ghosts"). While a player places a module, or a component inside a
+    // module, the others see its preview (type, size, place, green/red) with the player's name.
     //
-    // A remote ghost is a Module made by the game's own Module.create, then taken out of every game
-    // list (constructions, modules, categories, collider lookup) with its colliders off: the game
-    // never sees it, so it can't block a placement, count as a link target, get selected or saved.
+    // A remote ghost is made by the game's own Module.create / ConstructionComponent.create, then
+    // taken out of every game list (constructions, modules, categories, components, collider
+    // lookups) with its colliders off: the game never sees it, so it can't block a placement, count
+    // as a link target, get selected or saved.
     public static class Ghosts
     {
         private static readonly FieldInfo fActiveModule = AccessTools.Field(typeof(GameStateGame), "mActiveModule");
+        private static readonly FieldInfo fPlacedComponent = AccessTools.Field(typeof(GameStateGame), "mPlacedComponent");
+        private static readonly FieldInfo fComponents = AccessTools.Field(typeof(ConstructionComponent), "mComponents");
+        private static readonly FieldInfo fComponentDict = AccessTools.Field(typeof(ConstructionComponent), "mComponentDictionary");
+        private static readonly FieldInfo fCompObject = AccessTools.Field(typeof(ConstructionComponent), "mObject");
         private static readonly FieldInfo fConstructions = AccessTools.Field(typeof(Construction), "mConstructions");
         private static readonly FieldInfo fConstructionDict = AccessTools.Field(typeof(Construction), "mConstructionDictionary");
         private static readonly FieldInfo fModules = AccessTools.Field(typeof(Module), "mModules");
@@ -31,6 +36,8 @@ namespace PlanetbaseCoop.Sync
         public class Preview
         {
             public bool Present;
+            public bool Component;   // a component inside module Parent; else a module
+            public int Parent = -1;
             public string Type = "";
             public int Size;
             public Vector3 Pos;
@@ -38,20 +45,21 @@ namespace PlanetbaseCoop.Sync
             public bool Valid;
 
             public bool SameAs(Preview o) =>
-                o != null && o.Present == Present && (!Present || (o.Type == Type && o.Size == Size && o.Valid == Valid &&
+                o != null && o.Present == Present && (!Present || (o.Component == Component && o.Parent == Parent && o.Type == Type && o.Size == Size && o.Valid == Valid &&
                 (o.Pos - Pos).sqrMagnitude < 0.0025f && Quaternion.Angle(o.Rot, Rot) < 0.5f));
 
             public void Write(BinaryWriter w)
             {
                 w.Write(Present);
                 if (!Present) return;
+                w.Write(Component); w.Write(Parent);
                 w.Write(Type); w.Write(Size); w.WriteVec(Pos); w.WriteQuat(Rot); w.Write(Valid);
             }
 
             public static Preview Read(BinaryReader r)
             {
                 var p = new Preview { Present = r.ReadBoolean() };
-                if (p.Present) { p.Type = r.ReadString(); p.Size = r.ReadInt32(); p.Pos = r.ReadVec(); p.Rot = r.ReadQuat(); p.Valid = r.ReadBoolean(); }
+                if (p.Present) { p.Component = r.ReadBoolean(); p.Parent = r.ReadInt32(); p.Type = r.ReadString(); p.Size = r.ReadInt32(); p.Pos = r.ReadVec(); p.Rot = r.ReadQuat(); p.Valid = r.ReadBoolean(); }
                 return p;
             }
         }
@@ -61,8 +69,10 @@ namespace PlanetbaseCoop.Sync
             public int Player;
             public string Name = "";
             public Module Model;
+            public ConstructionComponent Comp;
             public string Type;
-            public int Size;
+            public int Size, Parent;
+            public GameObject Object => Model != null ? (GameObject)fObject.GetValue(Model) : Comp != null ? (GameObject)fCompObject.GetValue(Comp) : null;
             public float LastHeard;
         }
 
@@ -76,6 +86,22 @@ namespace PlanetbaseCoop.Sync
         public static Preview ReadLocal()
         {
             var game = GameAccess.Game();
+            var cc = game == null ? null : fPlacedComponent.GetValue(game) as ConstructionComponent;
+            if (cc != null && !cc.isDestroyed() && cc.getParentConstruction() != null)
+            {
+                var cgo = (GameObject)fCompObject.GetValue(cc);
+                if (cgo == null) return new Preview();
+                return new Preview
+                {
+                    Present = true,
+                    Component = true,
+                    Parent = cc.getParentConstruction().getId(),
+                    Type = cc.getComponentType().GetType().Name,
+                    Pos = cgo.transform.position,
+                    Rot = cgo.transform.localRotation,
+                    Valid = cc.isValidPosition(),
+                };
+            }
             var m = game == null ? null : fActiveModule.GetValue(game) as Module;
             // mActiveModule is also the module being edited (components); only a preview is Placing
             if (m == null || m.isDestroyed() || Registry.StateOf(m) != BuildableState.Placing) return new Preview();
@@ -117,12 +143,12 @@ namespace PlanetbaseCoop.Sync
             // a player who stopped sending (crash, lost link) loses their ghost after 3 s
             float now = Time.realtimeSinceStartup;
             var stale = new List<int>();
-            foreach (var g in sGhosts.Values) if (g.Model != null && now - g.LastHeard > 3f) stale.Add(g.Player);
+            foreach (var g in sGhosts.Values) if ((g.Model != null || g.Comp != null) && now - g.LastHeard > 3f) stale.Add(g.Player);
             foreach (var id in stale) Remove(id);
 
             foreach (var g in sGhosts.Values)
             {
-                if (g.Model == null) continue;
+                if (g.Model == null || g.Object == null) continue;
                 try { dTopRender(g.Model, dt, false); } catch { }
             }
         }
@@ -178,24 +204,56 @@ namespace PlanetbaseCoop.Sync
             g.Name = name;
             g.LastHeard = Time.realtimeSinceStartup;
             if (!p.Present) { DestroyModel(g); return; }
-            if (g.Model != null && (g.Type != p.Type || g.Size != p.Size)) DestroyModel(g);
-            if (g.Model == null)
+            // something else now: a module instead of a component, another type, size or module
+            bool isComp = g.Comp != null, isModule = g.Model != null;
+            if ((isComp || isModule) && (isComp != p.Component || g.Type != p.Type || g.Size != p.Size || g.Parent != p.Parent || g.Object == null))
+                DestroyModel(g);
+            if (g.Model == null && g.Comp == null)
             {
-                var type = TypeList<ModuleType, ModuleTypeList>.find(p.Type);
-                if (type == null) return;
-                bool prev = Commands.ApplyingRemote;
-                Commands.ApplyingRemote = true;
-                try { g.Model = Module.create(p.Pos, Mathf.Clamp(p.Size, type.getMinSize(), type.getMaxSize()), type); }
-                finally { Commands.ApplyingRemote = prev; }
-                Detach(g.Model);
-                g.Type = p.Type;
-                g.Size = p.Size;
+                if (!Create(g, p)) return;
                 Shown++;
             }
-            var go = (GameObject)fObject.GetValue(g.Model);
+            var go = g.Object;
+            if (go == null) return;
             go.transform.position = p.Pos;
-            go.transform.rotation = p.Rot;
-            if (g.Model.isValidPosition() != p.Valid) g.Model.setValidPosition(p.Valid);
+            if (p.Component) go.transform.localRotation = p.Rot; else go.transform.rotation = p.Rot;
+            var b = (Buildable)g.Model ?? g.Comp;
+            if (b.isValidPosition() != p.Valid) b.setValidPosition(p.Valid);
+        }
+
+        private static bool Create(Ghost g, Preview p)
+        {
+            if (p.Component)
+            {
+                var parent = Registry.Find(Kind.Module, p.Parent) as Construction;
+                var ct = TypeList<ComponentType, ComponentTypeList>.find(p.Type);
+                if (parent == null || ct == null) return false;
+                g.Comp = ConstructionComponent.create(parent, ct);
+                DetachComponent(g.Comp);
+            }
+            else
+            {
+                var type = TypeList<ModuleType, ModuleTypeList>.find(p.Type);
+                if (type == null) return false;
+                g.Model = Module.create(p.Pos, Mathf.Clamp(p.Size, type.getMinSize(), type.getMaxSize()), type);
+                Detach(g.Model);
+            }
+            g.Type = p.Type;
+            g.Size = p.Size;
+            g.Parent = p.Parent;
+            return true;
+        }
+
+        // a fresh component: out of the component list and lookup, colliders off (it stays a child
+        // of its module's object, so it moves and disappears with it)
+        private static void DetachComponent(ConstructionComponent cc)
+        {
+            var go = (GameObject)fCompObject.GetValue(cc);
+            ((List<ConstructionComponent>)fComponents.GetValue(null)).Remove(cc);
+            var dict = fComponentDict.GetValue(null) as System.Collections.IDictionary;
+            if (dict != null && go != null && dict.Contains(go)) dict.Remove(go);
+            if (go != null) foreach (var c in go.GetComponentsInChildren<Collider>(true)) c.enabled = false;
+            cc.setValidPosition(false);
         }
 
         // take a fresh module out of every game list and turn its colliders off
@@ -213,14 +271,14 @@ namespace PlanetbaseCoop.Sync
 
         private static void DestroyModel(Ghost g)
         {
-            if (g.Model == null) return;
             try
             {
-                var go = (GameObject)fObject.GetValue(g.Model);
+                var go = g.Object;   // null if its module was destroyed (the child object went with it)
                 if (go != null) UnityEngine.Object.Destroy(go);
             }
             catch (Exception e) { Log.Warn("ghost destroy: " + e.Message); }
             g.Model = null;
+            g.Comp = null;
         }
 
         private static void Remove(int player)
@@ -248,10 +306,10 @@ namespace PlanetbaseCoop.Sync
             }
             foreach (var g in sGhosts.Values)
             {
-                if (g.Model == null || string.IsNullOrEmpty(g.Name)) continue;
-                var go = (GameObject)fObject.GetValue(g.Model);
+                if (string.IsNullOrEmpty(g.Name)) continue;
+                var go = g.Object;
                 if (go == null) continue;
-                Vector3 sp = Camera.main.WorldToScreenPoint(go.transform.position + Vector3.up * 8f);
+                Vector3 sp = Camera.main.WorldToScreenPoint(go.transform.position + Vector3.up * (g.Comp != null ? 3f : 8f));
                 if (sp.z <= 0f) continue;
                 var size = sLabel.CalcSize(new GUIContent(g.Name));
                 GUI.Box(new Rect(sp.x - size.x / 2 - 6, Screen.height - sp.y - size.y / 2, size.x + 12, size.y + 4), g.Name, sLabel);
@@ -264,9 +322,11 @@ namespace PlanetbaseCoop.Sync
             var parts = new List<string>();
             foreach (var g in sGhosts.Values)
             {
-                if (g.Model == null) continue;
-                var p = ((GameObject)fObject.GetValue(g.Model)).transform.position;
-                parts.Add($"{g.Player}:{g.Type}:{g.Size}:{p.x:F1}:{p.z:F1}:{(g.Model.isValidPosition() ? 1 : 0)}");
+                var go = g.Object;
+                if (go == null) continue;
+                var p = go.transform.position;
+                var b = (Buildable)g.Model ?? g.Comp;
+                parts.Add($"{g.Player}:{g.Type}:{(g.Comp != null ? g.Parent : g.Size)}:{p.x:F1}:{p.z:F1}:{(b.isValidPosition() ? 1 : 0)}");
             }
             parts.Sort(StringComparer.Ordinal);
             return string.Join(";", parts);

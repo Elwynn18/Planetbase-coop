@@ -76,8 +76,9 @@ Joining loads the host's colony on the joiner. Then:
 - Trading together: when several players have the same merchant's window open, what one moves into
   the transaction boxes appears in the others' windows at once. Whoever presses Trade concludes it,
   and the other windows close.
-- While someone places a building, the others see its preview (green or red, as for the player placing
-  it) with that player's name above it. It is only a picture: it doesn't block anyone's placement.
+- While someone places a building, or a component inside a building (bed, table, workbench...), the
+  others see its preview (green or red, as for the player placing it) with that player's name above it.
+  It is only a picture: it doesn't block anyone's placement.
 - Meteors, lightning, sandstorms, blizzards and solar flares show for everyone. Their damage is worked
   out on the host only.
 - The colony runs on the host only. Joiners see the host's colonists, robots, resources, ships,
@@ -101,7 +102,6 @@ Joining loads the host's colony on the joiner. Then:
 - A building placed right at the edge of the allowed area next to the colony ship can show as blocked for
   a joiner while the host could still place it. Move it a little.
 - Camera, selection and open windows are per player (by design).
-- Previews of components (furniture inside a module) are not shared, only building previews.
 
 ## Test checklist (for a friend trying it with you)
 
@@ -121,7 +121,7 @@ Do these in order and note what happens at each step. Both players: same game ve
    appear for the host? Joiner: press Trade. Does the host's window close and do colonists start
    carrying the goods?
    Also: an accumulator's gauge, the colonist counter (top left) and any meteor or sandstorm should
-   look the same on both screens, and each player should see the other's building preview (with their
+   look the same on both screens, and each player should see the other's building and component previews (with their
    name) while they choose where to put a building.
 9. Joiner: try to save. You should see "Only the host can save."
 10. Repeat steps 2-3 with the IP option instead of Steam (host's address and port 47610).
@@ -140,7 +140,7 @@ Since 0.2.0 the host's `LogOutput.log` also receives the errors caught on joiner
 - Accumulators and water tanks show their real level on joiners' screens (they looked full).
 - The colonist counter on joiners' screens showed 2147483647 (wrapped on several lines); it now counts.
 - Shared trade window (see Play).
-- Other players' building previews are visible (see Play). Component previews inside a module are not.
+- Other players' building and component previews are visible (see Play).
 - A game error on a joiner's PC no longer forces them to quit (see Known issues), and reaches the
   host's log.
 - When a joiner's trade failed on the host (the base no longer had what was offered), the base could

@@ -655,9 +655,63 @@ namespace PlanetbaseCoop
                         {
                             bool atSpot = Registry.Constructions.OfType<Module>().Any(m => m.getModuleType() is ModuleTypeWaterExtractor && (m.getPosition() - sGhostSpot).magnitude < 1f);
                             Check("joiner builds where its ghost was shown (the ghost blocks nothing); ghost removed", atSpot);
-                            sStep = 14; sEntered = false; sStepT = 0;
+                            Next();
                         }
                         else if (sStepT > 10f) { Check("joiner's placement preview on the host (stage " + sGhostStage + ")", false, $"host ghosts '{mine}', modules {Module.getCount() - sModulesBefore} new, last result {Commands.LastResult}"); sStep = 14; sEntered = false; sStepT = 0; }
+                    }
+                    break;
+                case 53: // component preview inside a module: host's shows on the joiner, then goes away
+                    if (First())
+                    {
+                        sCompsBefore = Registry.Components.Count;
+                        sHostComp = ConstructionComponent.create(sM1, TypeList<ComponentType, ComponentTypeList>.find("Bench"));
+                        sHostComp.setPosition(sM1.getPosition() + new Vector3(1.5f, 0f, 0.5f));
+                        sHostComp.setValidPosition(true);
+                        fPlacedComponent.SetValue(GameAccess.Game(), sHostComp);   // what tryPlaceComponent leaves while you aim
+                        sGhostStage = 0;
+                        return;
+                    }
+                    {
+                        string want = $"0:Bench:{sM1.getId()}:";
+                        string theirs = Get(sRemote, "ghosts");
+                        bool fresh = sT - sRemoteAt < 1f;
+                        if (sGhostStage == 0 && fresh && theirs.Contains(want) && theirs.Contains(want) && theirs.EndsWith(":1"))
+                        {
+                            var e = theirs.Split(':');
+                            var at = sHostComp.getPosition();
+                            bool near = Mathf.Abs(float.Parse(e[3]) - at.x) < 0.3f && Mathf.Abs(float.Parse(e[4]) - at.z) < 0.3f;
+                            // the host's own preview is in its component list (it's the game's preview); the joiner's copy must not be
+                            Check("host's component preview shows on the joiner, in the right module and place, not as a component",
+                                near && Get(sRemote, "count.Component") == Registry.Components.Count(c => c != sHostComp && !c.isDestroyed() && Registry.StateOf(c) != BuildableState.Placing).ToString(), theirs);
+                            sHostComp.destroy();
+                            sHostComp = null;
+                            fPlacedComponent.SetValue(GameAccess.Game(), null);
+                            sGhostStage = 1; sStepT = 0f;
+                        }
+                        else if (sGhostStage == 1 && fresh && !theirs.Contains(":Bench:") && sStepT > 0.3f)
+                        {
+                            Check("host's component preview gone: gone on the joiner", true);
+                            Next();
+                        }
+                        else if (sStepT > 8f) { Check("host's component preview on the joiner (stage " + sGhostStage + ")", false, "joiner ghosts: " + theirs); Next(); }
+                    }
+                    break;
+                case 54: // the joiner's component preview shows on the host
+                    if (First()) { SendProbe("do", $"comp-ghost-start {sM1.getId()} Table"); sGhostStage = 0; return; }
+                    {
+                        string mine = Ghosts.Digest();
+                        if (sGhostStage == 0 && mine.Contains($":Table:{sM1.getId()}:"))
+                        {
+                            Check("joiner's component preview shows on the host, not as a component", Registry.Components.Count == sCompsBefore, mine);
+                            SendProbe("do", "comp-ghost-end");
+                            sGhostStage = 1; sStepT = 0f;
+                        }
+                        else if (sGhostStage == 1 && !mine.Contains(":Table:"))
+                        {
+                            Check("joiner's component preview gone: gone on the host", true);
+                            sStep = 14; sEntered = false; sStepT = 0;
+                        }
+                        else if (sStepT > 8f) { Check("joiner's component preview on the host (stage " + sGhostStage + ")", false, $"host ghosts '{mine}'"); sStep = 14; sEntered = false; sStepT = 0; }
                     }
                     break;
                 case 6: // T2: host builds a module, joiner sees it
@@ -766,6 +820,9 @@ namespace PlanetbaseCoop
         }
 
         private static Module sAccu, sTank, sHostPreview;
+        private static ConstructionComponent sHostComp;
+        private static int sCompsBefore;
+        private static readonly FieldInfo fPlacedComponent = AccessTools.Field(typeof(GameStateGame), "mPlacedComponent");
         private static Vector3 sGhostSpot;
         private static int sGhostStage;
         private static string sMeteorName, sHitText;
@@ -1048,6 +1105,8 @@ namespace PlanetbaseCoop
         private static readonly Queue<string> sClientQueue = new Queue<string>();
         private static string sDropped = "";
         private static readonly FieldInfo fActiveModule = AccessTools.Field(typeof(GameStateGame), "mActiveModule");
+        private static readonly FieldInfo fPlacedComponentC = AccessTools.Field(typeof(GameStateGame), "mPlacedComponent");
+        private static ConstructionComponent sClientComp;
         private static readonly MethodInfo mPlaceModule = AccessTools.Method(typeof(GameStateGame), "placeModule");
         private static readonly MethodInfo mIncreaseSpeed = AccessTools.Method(typeof(GameStateGame), "increaseSpeed");
 
@@ -1213,6 +1272,21 @@ namespace PlanetbaseCoop
                     Log.Info("bot: joiner preview at " + pos + " valid " + preview.isValidPosition() + (preview.isValidPosition() ? "" : ": " + PlacementDiag.Why(preview, pos)));
                     break;
                 }
+                case "comp-ghost-start":
+                {
+                    var m = Registry.Find(Kind.Module, int.Parse(a[1])) as Module;
+                    var cc = ConstructionComponent.create(m, TypeList<ComponentType, ComponentTypeList>.find(a[2]));
+                    cc.setPosition(m.getPosition() + new Vector3(-1.5f, 0f, 0.5f));
+                    cc.setValidPosition(true);
+                    fPlacedComponentC.SetValue(game, cc);
+                    sClientComp = cc;
+                    break;
+                }
+                case "comp-ghost-end":   // right click: the game's cancelComponentPlacement
+                    sClientComp?.destroy();
+                    sClientComp = null;
+                    fPlacedComponentC.SetValue(game, null);
+                    break;
                 case "ghost-commit":
                     mPlaceModule.Invoke(game, null);   // the click: PlaceModulePrefix sends it, drops the preview
                     break;
