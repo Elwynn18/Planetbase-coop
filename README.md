@@ -22,7 +22,33 @@ first playtest by two people over Steam (version 0.1.0; its bugs are fixed in 0.
   `Assembly-CSharp.dll` byte for byte, so a mod that patches it on disk shows up as "Different game
   build". Steam > Properties > Installed Files > Verify integrity restores the original file.
 
-## Install on Windows
+## Automatic install (recommended)
+
+One file per system does everything: finds Steam and Planetbase (in any Steam library), checks the
+game version, installs BepInEx (official archive, SHA-256 checked), installs the mod or replaces it
+with the latest version (SHA-256 checked, the previous version kept in `BepInEx/coop-backup/`), and
+offers to start the game. **To update later, run it again.** It also updates itself. Its messages are
+in French.
+
+**Windows:** download [`install/Planetbase-Coop.bat`](install/Planetbase-Coop.bat) (on that page:
+"Download raw file") and double-click it. Windows may warn that the file comes from the internet
+("Windows protected your PC"): click "More info", then "Run anyway". If the game sits in a folder
+Windows protects, the script offers to restart itself as administrator.
+
+**Linux (Steam + Proton):** download [`install/planetbase-coop.sh`](install/planetbase-coop.sh) and run
+`bash planetbase-coop.sh`. It also sets the Steam launch option Proton needs
+(`WINEDLLOVERRIDES="winhttp=n,b" %command%`): Steam must be closed for that, so it offers to close
+Steam and backs up Steam's `localconfig.vdf` first. If you already have a `WINEDLLOVERRIDES`, it adds
+`winhttp=n,b` to that list.
+
+Both open a menu (install or update, uninstall). Command line: `install`, `uninstall`, and
+`--game-dir <folder>` (`-GameDir` on Windows) if the game is not in a Steam library. A log of each run
+goes to `~/.cache/planetbase-coop-installer.log` (Linux) or `%TEMP%\planetbase-coop-installer.log`
+(Windows).
+
+The manual steps below do the same by hand.
+
+## Install on Windows (manual)
 
 1. In Steam: right-click Planetbase > Manage > Browse local files. This opens the game folder
    (the one with `Planetbase.exe`). Call it `<game dir>`.
@@ -32,7 +58,7 @@ first playtest by two people over Steam (version 0.1.0; its bugs are fixed in 0.
 4. Copy `PlanetbaseCoop.dll` into `<game dir>\BepInEx\plugins\`.
 5. Start the game. Press **F8** on the main menu: the "Planetbase Co-op" panel opens.
 
-## Install on Linux (Steam + Proton)
+## Install on Linux (Steam + Proton, manual)
 
 1. Steps 1 to 4 above, on the game folder (Steam > Manage > Browse local files).
 2. Steam: right-click Planetbase > Properties > General > Launch options, enter:
@@ -145,6 +171,13 @@ Since 0.2.0 the host's `LogOutput.log` also receives the errors caught on joiner
   host's log.
 - When a joiner's trade failed on the host (the base no longer had what was offered), the base could
   lose the coins in that offer; fixed.
+
+## Publishing a version (maintainers)
+
+Build, then `./release.sh`: it copies `out/PlanetbaseCoop.dll` to `release/<version>/` and rewrites
+`release/latest.txt` (version, SHA-256, expected game build, installer checksums). Commit and push to
+`main`; the installers read `release/latest.txt` from there. Bump the version in `src/Plugin.cs` for
+every new build: `release.sh` refuses to put a different build under an existing version.
 
 ## Build from source
 

@@ -1,0 +1,11 @@
+# Planetbase Co-op: latest release, read by install/planetbase-coop.sh and install/Planetbase-Coop.bat
+version=0.2.0
+dll=release/0.2.0/PlanetbaseCoop.dll
+sha256=e911c5f4089e111291bd4afd9707b19cf8355cc99042df69b56aee3f9c3e0779
+game_version=1.4.2
+game_sha256=245441e4892d10551823334b7171ec712e88e7218913c20d8b44154ca98af045
+installer_version=1
+installer_sh=install/planetbase-coop.sh
+installer_sh_sha256=a8d4b85419d8c173783cde9ce841811bf07eb34c9dbd9186926599dbad160eaa
+installer_bat=install/Planetbase-Coop.bat
+installer_bat_sha256=4d4037ba09db56190892d3700856350b650d68aa545362e49df187b92b84e810
