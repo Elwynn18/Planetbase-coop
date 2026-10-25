@@ -21,11 +21,18 @@ namespace PlanetbaseCoop.Sync
         private static Dictionary<string, Texture2D> sIcons;
         public static int Forwarded, Shown;
 
+        // joiner: set while replaying host-driven game code (storm start) whose notification the
+        // host forwards anyway
+        public static bool SuppressLocal;
+
         public static void Patch(Harmony h)
         {
             h.Patch(AccessTools.Method(typeof(MessageLog), nameof(MessageLog.addMessage)),
+                prefix: new HarmonyMethod(typeof(Messages), nameof(AddPrefix)),
                 postfix: new HarmonyMethod(typeof(Messages), nameof(AddPostfix)));
         }
+
+        private static bool AddPrefix() => !(SuppressLocal && Mirror.Active);
 
         private static void AddPostfix(Message message)
         {

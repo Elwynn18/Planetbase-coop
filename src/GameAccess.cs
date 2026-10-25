@@ -16,5 +16,9 @@ namespace PlanetbaseCoop
         public static GameState CurrentState() => Manager?.getGameState();
 
         public static GameStateGame Game() => CurrentState() as GameStateGame;
+
+        private static readonly FieldInfo sGameGui = AccessTools.Field(typeof(GameStateGame), "mGameGui");
+
+        public static GameGui Gui() { var g = Game(); return g == null ? null : sGameGui.GetValue(g) as GameGui; }
     }
 }

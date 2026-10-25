@@ -4,9 +4,9 @@ Online co-op for [Planetbase](https://store.steampowered.com/app/403190/Planetba
 two or more players run one colony together. One player hosts; everyone else joins and plays in the
 host's colony. A [BepInEx 5](https://github.com/BepInEx/BepInEx) plugin, MIT licensed.
 
-**Status: alpha.** It passes automated tests with two copies of the game on one PC (direct IP). It has not yet
-been played by two people over the internet, and the Steam invite path has never run between two real
-Steam accounts. Expect bugs; see [Known issues](#known-issues).
+**Status: alpha.** It passes automated tests with two copies of the game on one PC (direct IP), and one
+first playtest by two people over Steam (version 0.1.0; its bugs are fixed in 0.2.0, see
+[Changes](#changes)). Expect bugs; see [Known issues](#known-issues).
 
 ## Requirements
 
@@ -73,6 +73,13 @@ Joining loads the host's colony on the joiner. Then:
   game speed and the alert level, sets landing permissions and manufacturing limits, and trades with
   merchant ships. Joiners' actions are sent to the host, which carries them out; the result comes back
   to everyone.
+- Trading together: when several players have the same merchant's window open, what one moves into
+  the transaction boxes appears in the others' windows at once. Whoever presses Trade concludes it,
+  and the other windows close.
+- While someone places a building, the others see its preview (green or red, as for the player placing
+  it) with that player's name above it. It is only a picture: it doesn't block anyone's placement.
+- Meteors, lightning, sandstorms, blizzards and solar flares show for everyone. Their damage is worked
+  out on the host only.
 - The colony runs on the host only. Joiners see the host's colonists, robots, resources, ships,
   construction progress and notifications.
 - **Only the host can save.** The host's save holds the whole colony, so you can continue later by
@@ -83,17 +90,23 @@ Joining loads the host's colony on the joiner. Then:
 
 - Steam invites have not been tested between two real accounts yet. If they fail, use the IP option.
 - Not played over the internet yet, and only tested with two players.
-- Sandstorms, blizzards, solar flares and meteor strikes are not shown to joiners yet. They still happen
-  in the host's colony.
+- Lightning, blizzards and solar flares reach joiners through the same code as meteors and sandstorms,
+  but only meteors and sandstorms have been tested so far.
+- The anti-meteor laser shoots meteors down for everyone, but joiners don't see its beam, only the
+  meteor vanishing.
+- If a game error happens on a joiner's PC, the mod no longer lets the game show its "ERROR ... Quit"
+  page: it notes the error in the log, shows a short notice, and sends the error to the host's log. If
+  something looks wrong after that notice, leave and rejoin.
 - Only the host's actions run instantly; a joiner's action takes one round trip to the host.
 - A building placed right at the edge of the allowed area next to the colony ship can show as blocked for
   a joiner while the host could still place it. Move it a little.
 - Camera, selection and open windows are per player (by design).
+- Previews of components (furniture inside a module) are not shared, only building previews.
 
 ## Test checklist (for a friend trying it with you)
 
 Do these in order and note what happens at each step. Both players: same game version, same
-`PlanetbaseCoop.dll`, F8 panel shows the same "Game 1.4.2 (...), mod 0.1.0 (...)" line at the bottom.
+`PlanetbaseCoop.dll`, F8 panel shows the same "Game 1.4.2 (...), mod 0.2.0 (...)" line at the bottom.
 
 1. Both: start the game, press F8 on the main menu. Compare the bottom line of the panel. Same text?
 2. Host: load a colony, F8 > Host with Steam > Invite Steam friends > invite the joiner.
@@ -103,15 +116,35 @@ Do these in order and note what happens at each step. Both players: same game ve
 5. Host: place a building. Does the joiner see it appear and progress?
 6. Joiner: change game speed. Does it change for both?
 7. Both: watch a colonist walk for a minute. Is it at the same place on both screens?
-8. Wait for a merchant ship (or turn landing permissions on). Joiner: open the trade window and make a
-   trade. Do colonists start carrying the goods on the host?
+8. Wait for a merchant ship (or turn landing permissions on). Both open its trade window. Host: click an
+   item into a transaction box. Does it appear in the joiner's window? Joiner: click one in. Does it
+   appear for the host? Joiner: press Trade. Does the host's window close and do colonists start
+   carrying the goods?
+   Also: an accumulator's gauge, the colonist counter (top left) and any meteor or sandstorm should
+   look the same on both screens, and each player should see the other's building preview (with their
+   name) while they choose where to put a building.
 9. Joiner: try to save. You should see "Only the host can save."
 10. Repeat steps 2-3 with the IP option instead of Steam (host's address and port 47610).
 11. Host: quit. Does the joiner get a "Disconnected" message and return to the menu?
 
-If something goes wrong, send the host these files from both PCs:
-`<game dir>\BepInEx\LogOutput.log` and the player log
-(Windows: `%USERPROFILE%\AppData\LocalLow\Madruga Works\Planetbase\Player.log`).
+If something goes wrong, send the host these files from both PCs **before starting the game again**
+(the game overwrites them at each start): `<game dir>\BepInEx\LogOutput.log` and the player logs
+(Windows: `%USERPROFILE%\AppData\LocalLow\Madruga Works\Planetbase\Player.log` and `Player-prev.log`).
+Since 0.2.0 the host's `LogOutput.log` also receives the errors caught on joiners' PCs.
+
+## Changes
+
+**0.2.0** (fixes from the first playtest; host and joiners must all update, 0.1.0 and 0.2.0 refuse each other)
+
+- Joiners now see meteors, lightning, sandstorms, blizzards and solar flares.
+- Accumulators and water tanks show their real level on joiners' screens (they looked full).
+- The colonist counter on joiners' screens showed 2147483647 (wrapped on several lines); it now counts.
+- Shared trade window (see Play).
+- Other players' building previews are visible (see Play). Component previews inside a module are not.
+- A game error on a joiner's PC no longer forces them to quit (see Known issues), and reaches the
+  host's log.
+- When a joiner's trade failed on the host (the base no longer had what was offered), the base could
+  lose the coins in that offer; fixed.
 
 ## Build from source
 

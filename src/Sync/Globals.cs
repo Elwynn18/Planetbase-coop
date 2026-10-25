@@ -33,6 +33,7 @@ namespace PlanetbaseCoop.Sync
                 w.Write(env.getWindIndicator().getValue());
                 w.WriteVec((Vector3)fWindDir.GetValue(env));
                 w.Write(env.getCloudCoverIndicator().getValue());
+                w.Write(ColonyStats.GameTime);   // colony clock: day counter, thunderstorm cycle
             });
         }
 
@@ -44,6 +45,7 @@ namespace PlanetbaseCoop.Sync
             float tod = r.ReadSingle(), wind = r.ReadSingle();
             Vector3 windDir = r.ReadVec();
             float cloud = r.ReadSingle();
+            double gameTime = r.ReadDouble();
 
             var tm = Singleton<TimeManager>.getInstance();
             if ((int)fScaleIndex.GetValue(tm) != scale || (bool)fPaused.GetValue(tm) != paused)
@@ -62,6 +64,7 @@ namespace PlanetbaseCoop.Sync
             fWindDir.SetValue(env, windDir);
             fWindChange.SetValue(env, 1e9f);
             env.getCloudCoverIndicator().setValue(cloud);
+            ColonyStats.SetGameTime(gameTime);
         }
     }
 

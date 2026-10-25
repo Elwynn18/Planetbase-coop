@@ -30,6 +30,8 @@ namespace PlanetbaseCoop.Sync
         private static readonly Action<Module, float> dNacelle = AccessTools.MethodDelegate<Action<Module, float>>(AccessTools.Method(typeof(Module), "updateNacelle"));
         private static readonly Action<Module, float> dPanels = AccessTools.MethodDelegate<Action<Module, float>>(AccessTools.Method(typeof(Module), "updatePanels"));
         private static readonly Action<Module, float> dScan = AccessTools.MethodDelegate<Action<Module, float>>(AccessTools.Method(typeof(Module), "updateScanAnimation"));
+        private static readonly Action<Module> dGauge = AccessTools.MethodDelegate<Action<Module>>(AccessTools.Method(typeof(Module), "updateGaugeEffect"));
+        private static readonly Action<Module> dTank = AccessTools.MethodDelegate<Action<Module>>(AccessTools.Method(typeof(Module), "updateTankEffect"));
         private static readonly Action<ConstructionComponent, float> dCompColor = AccessTools.MethodDelegate<Action<ConstructionComponent, float>>(AccessTools.Method(typeof(ConstructionComponent), "updateTargetColor"));
 
         public static void Reset()
@@ -201,6 +203,15 @@ namespace PlanetbaseCoop.Sync
                 BuildRec.OxygenIndicator(c).setValue(rec.Oxygen);
                 if (c.isPowered() != rec.Powered) c.setPower(rec.Powered);
                 if (c.hasWater() != rec.Water) c.setHasWater(rec.Water);
+                if (c is Module m)
+                {
+                    // accumulators and water tanks: the stored amount, and the gauge/tank fill on the
+                    // model (the game redraws those only in its simulation tick)
+                    var ps = m.getPowerStorageIndicator();
+                    if (ps != null && rec.PowerStored >= 0f) { ps.setValue(rec.PowerStored); dGauge(m); }
+                    var ws = m.getWaterStorageIndicator();
+                    if (ws != null && rec.WaterStored >= 0f) { ws.setValue(rec.WaterStored); dTank(m); }
+                }
             }
             else if (b is ConstructionComponent cc && rec.ProducedItem >= 0 && BuildRec.ProducedItemOf(cc) != rec.ProducedItem)
             {
@@ -277,6 +288,11 @@ namespace PlanetbaseCoop.Sync
             }
             Singleton<EnvironmentManager>.getInstance().update(0f);
             Singleton<MessageLog>.getInstance().update(dt);   // the sim block that normally ticks it is skipped
+            var time = Singleton<TimeManager>.getInstance();
+            try { Hazards.JoinerTick(dt * time.getTimeScale()); }
+            catch (Exception e) { Log.Warn("storm update failed: " + e.Message); }
+            try { ColonyStats.JoinerTick(dt); }
+            catch (Exception e) { Log.Warn("colony stats failed: " + e.Message); }
         }
     }
 }

@@ -54,6 +54,7 @@ namespace PlanetbaseCoop
             Peers.Clear();
             WorldSync.Reset();
             Settings.Reset();
+            TradeShare.Reset();
             Application.runInBackground = true;   // the host must keep simulating when alt-tabbed
             Status = "Hosting (" + t.Describe + ")";
             Log.Info("Hosting: " + t.Describe + ", " + VersionInfo.Local);
@@ -70,6 +71,7 @@ namespace PlanetbaseCoop
             LastRefusal = null;
             WorldApply.Reset();
             Settings.Reset();
+            TradeShare.Reset();
             sQueuedWhileLoading.Clear();
             Application.runInBackground = true;
             Status = "Connecting (" + t.Describe + ")";
@@ -96,6 +98,7 @@ namespace PlanetbaseCoop
             Role = Role.None;
             Phase = ClientPhase.None;
             Peers.Clear();
+            Ghosts.Clear();
             Mirror.End();
             Status = "Not in a session (" + reason + ")";
             if (wasMirror)
@@ -120,6 +123,11 @@ namespace PlanetbaseCoop
                 if (!Active) return;
             }
             if (IsHost) HostUpdate(dt); else ClientUpdate(dt);
+            if (Active)
+            {
+                try { Ghosts.Tick(dt); }
+                catch (Exception ex) { Log.Warn("ghosts: " + ex.Message); }
+            }
         }
 
         private static void Handle(NetEvent e)
@@ -146,6 +154,8 @@ namespace PlanetbaseCoop
                         if (Peers.TryGetValue(e.Peer, out var p))
                         {
                             Peers.Remove(e.Peer);
+                            TradeShare.OnPeerLeft(e.Peer);
+                            Ghosts.OnPeerLeft(e.Peer);
                             if (p.Welcomed) Notice(p.Name + " left (" + e.Reason + ")");
                         }
                     }
@@ -208,6 +218,18 @@ namespace PlanetbaseCoop
                 case Msg.TestProbe:
                     TestBot.OnProbe(peer, r);
                     break;
+                case Msg.TradeBasket:
+                    TradeShare.OnHostBasket(peer, r);
+                    break;
+                case Msg.TradeView:
+                    TradeShare.OnHostView(peer, r);
+                    break;
+                case Msg.ErrorReport:
+                    ErrorGuard.OnReport(p.Name, r);
+                    break;
+                case Msg.Ghost:
+                    Ghosts.OnHost(peer, p.Name, r);
+                    break;
             }
         }
 
@@ -229,6 +251,7 @@ namespace PlanetbaseCoop
             {
                 WorldSync.Tick(dt, Transport, null, ready);
                 Settings.HostTick(dt, Transport, ready);
+                Hazards.HostTick(dt, Transport, ready);
             }
             foreach (var p in Peers.Values.ToList())
             {
@@ -252,7 +275,7 @@ namespace PlanetbaseCoop
         {
             sHostLastHeard = sClock;
             var r = Wire.Reader(data, out var type);
-            if (Phase == ClientPhase.Loading && (type == Msg.Created || type == Msg.Destroyed || type == Msg.States || type == Msg.Globals || type == Msg.Settings || type == Msg.GameMessage))
+            if (Phase == ClientPhase.Loading && (type == Msg.Created || type == Msg.Destroyed || type == Msg.States || type == Msg.Globals || type == Msg.Settings || type == Msg.GameMessage || type == Msg.Disasters))
             {
                 sQueuedWhileLoading.Add(data);
                 return;
@@ -298,6 +321,11 @@ namespace PlanetbaseCoop
                 case Msg.Pong: break;
                 case Msg.Bye: Stop("host: " + r.ReadString()); break;
                 case Msg.TestProbe: TestBot.OnProbe(0, r); break;
+                case Msg.TradeBasket: TradeShare.OnClientBasket(r); break;
+                case Msg.TradeEnd: TradeShare.OnClientEnd(r); break;
+                case Msg.Hazard: if (Phase == ClientPhase.Mirroring) Hazards.OnHazard(r); break;
+                case Msg.Disasters: Hazards.OnDisasters(r); break;
+                case Msg.Ghost: if (Phase == ClientPhase.Mirroring) Ghosts.OnClient(r); break;
             }
         }
 

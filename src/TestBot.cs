@@ -137,8 +137,43 @@ namespace PlanetbaseCoop
             d["dropped"] = sDropped;
             d["alert"] = ((int)Singleton<SecurityManager>.getInstance().getAlertState()).ToString();
             d["tod"] = Singleton<EnvironmentManager>.getInstance().getTimeIndicator().getValue().ToString("F3");
+            // hazards scenario
+            Registry.Collect(Kind.Module, sScratch);
+            d["stores"] = string.Join(";", sScratch.Values.Cast<Module>().Where(m => m.getPowerStorageIndicator() != null || m.getWaterStorageIndicator() != null)
+                .OrderBy(m => m.getId()).Select(m => $"{m.getId()}:{Ratio(m.getPowerStorageIndicator()):F3}:{Ratio(m.getWaterStorageIndicator()):F3}:{Fill(m, "Gauge"):F3}:{Fill(m, "Tank"):F3}"));
+            d["colonists"] = Singleton<Colony>.getInstance().getColonistCount().ToString();
+            d["meteors"] = string.Join(";", MeteorObjects().Select(g => $"{g.name.Replace(' ', '_')}:{g.transform.position.x:F1}:{g.transform.position.y:F1}:{g.transform.position.z:F1}"));
+            d["storms"] = Hazards.StormDigest();
+            d["sandfx"] = fSandParticles.GetValue(Singleton<DisasterManager>.getInstance().getSandstorm()) != null ? "1" : "0";
+            d["tradewin"] = TradeShare.Digest(TradeShare.OpenWindow);
+            d["caught"] = ErrorGuard.Caught.ToString();
+            d["fatal"] = (fFatal.GetValue(null) as string) ?? "none";
+            d["crawl"] = sCrawlReport;
+            d["ghosts"] = Ghosts.Digest();
             return d;
         }
+
+        private static readonly FieldInfo fSandParticles = AccessTools.Field(typeof(Sandstorm), "mParticles");
+        private static readonly FieldInfo fFatal = AccessTools.Field(typeof(ErrorManager), "mFatalErrorString");
+        private static readonly FieldInfo fMeteorList = AccessTools.Field(typeof(MeteorManager), "mMeteors");
+        private static readonly FieldInfo fSandTime = AccessTools.Field(typeof(Sandstorm), "mTime");
+        private static readonly FieldInfo fSandDuration = AccessTools.Field(typeof(Sandstorm), "mSandstormTime");
+
+        private static float Ratio(Indicator i) => i == null ? -1f : i.getRatio();
+
+        // what the accumulator's gauge / the tank's level shows on the model (-1: no such part)
+        private static float Fill(Module m, string tag)
+        {
+            var go = m.getSelectionModel()?.findTaggedObject(tag);
+            var rend = go?.GetComponent<Renderer>();
+            if (rend == null) return -1f;
+            var mpb = new MaterialPropertyBlock();
+            rend.GetPropertyBlock(mpb);
+            return mpb.GetFloat(UnityEngine.ShaderProperty.FillRatio);
+        }
+
+        private static List<GameObject> MeteorObjects() =>
+            ((List<GameObject>)fMeteorList.GetValue(Singleton<MeteorManager>.getInstance()) ?? new List<GameObject>()).Where(g => g != null).ToList();
 
         private static string Encode(Dictionary<string, string> d) => string.Join("\n", d.Select(kv => kv.Key + "=" + kv.Value));
 
@@ -260,6 +295,7 @@ namespace PlanetbaseCoop
                     {
                         Next();
                         if (sScenario == "ships") { sStep = 20; }
+                        else if (sScenario == "hazards") { sStep = 40; }
                     }
                     break;
                 // ---------------------------------------------------- ships scenario
@@ -334,6 +370,295 @@ namespace PlanetbaseCoop
                 case 25:
                     if (Get(sRemote, "land.visitors") == "0") { Check("host's landing permission change reaches the joiner", true); sStep = 14; sEntered = false; sStepT = 0; }
                     else Timeout(10, "host's landing permission change reaches the joiner");
+                    break;
+                // ---------------------------------------------------- hazards scenario (playtest 1 bugs)
+                case 40: // accumulator and water tank: stored amount and the gauge/tank on the model
+                    if (First())
+                    {
+                        sAccu = PlaceAndBuild("ModuleTypePowerCollector", 0, sBase, 26f);
+                        sTank = PlaceAndBuild("ModuleTypeWaterTank", 0, sAccu.getPosition(), 16f);
+                        Singleton<TimeManager>.getInstance().pause();   // keep the stored amounts still while comparing
+                        sAccu.getPowerStorageIndicator().setValue(0f);  // the playtest case: empty, shown full
+                        sTank.getWaterStorageIndicator().setValue(sTank.getWaterStorageIndicator().getMax() * 0.6f);
+                        return;
+                    }
+                    if (sStepT > 1f && StoresMatch(sStepT >= 15f, "empty accumulator and 60% tank look the same on the joiner")) { sStep = 41; sEntered = false; sStepT = 0; }
+                    break;
+                case 41:
+                    if (First()) { sAccu.getPowerStorageIndicator().setValue(sAccu.getPowerStorageIndicator().getMax() * 0.37f); return; }
+                    if (sStepT > 1f && StoresMatch(sStepT >= 15f, "37% accumulator shows 37% on the joiner")) { Singleton<TimeManager>.getInstance().unpause(); Next(); }
+                    break;
+                case 42: // colonist count on the joiner's top panel
+                    {
+                        string mine = Singleton<Colony>.getInstance().getColonistCount().ToString(), theirs = Get(sRemote, "colonists");
+                        if (theirs == mine && sT - sRemoteAt < 2f) { Check("joiner's colonist counter matches the host", true, mine); Next(); }
+                        else if (sStepT > 15f) { Check("joiner's colonist counter matches the host", false, $"host {mine} joiner {theirs}"); Next(); }
+                    }
+                    break;
+                case 43: // a meteor in open ground: same rock, same path on the joiner
+                    LogMeteors();
+                    if (First())
+                    {
+                        var mm = Singleton<MeteorManager>.getInstance();
+                        sAimSeed = ((List<int>)fMeteorSeedList.GetValue(mm))[0];
+                        sAimTarget = FindFreeSpot("ModuleTypeSolarPanel", 0, sBase, 70f);
+                        mm.spawnMeteor(sAimTarget);
+                        sMeteorName = sAimName = MeteorObjects().Last().name;
+                        return;
+                    }
+                    {
+                        var host = MeteorObjects().FirstOrDefault(g => g.name == sMeteorName);
+                        var e = ParseEntries(Get(sRemote, "meteors"));
+                        string key = sMeteorName.Replace(' ', '_');
+                        if (host != null && e.TryGetValue(key, out var t) && sT - sRemoteAt < 1f && sStepT < 3f)
+                        {
+                            var hp = host.transform.position;
+                            float dx = hp.x - float.Parse(t[0]), dy = hp.y - float.Parse(t[1]), dz = hp.z - float.Parse(t[2]);
+                            float dist = Mathf.Sqrt(dx * dx + dy * dy + dz * dz);
+                            // the joiner's digest is up to 0.5 s old and the rock falls ~100 m/s
+                            Check("meteor seen by the joiner on the host's path", dist < 60f, $"{sMeteorName}, {dist:F1} m apart (digest age {sT - sRemoteAt:F2} s)");
+                            Next();
+                        }
+                        else if (sStepT > 6f) { Check("meteor seen by the joiner", false, $"joiner meteors: {Get(sRemote, "meteors")}"); Next(); }
+                    }
+                    break;
+                case 44: // a meteor shot down (removed) on the host disappears on the joiner
+                    if (First())
+                    {
+                        Singleton<MeteorManager>.getInstance().spawnMeteor(FindFreeSpot("ModuleTypeSolarPanel", 0, sBase, 90f));
+                        sMeteorName = MeteorObjects().Last().name;
+                        return;
+                    }
+                    if (sStepT > 0.8f && sStepT < 5f && sEntered && !sRemoved)
+                    {
+                        string key = sMeteorName.Replace(' ', '_');
+                        if (ParseEntries(Get(sRemote, "meteors")).ContainsKey(key) && sT - sRemoteAt < 1f)
+                        {
+                            var go = MeteorObjects().FirstOrDefault(g => g.name == sMeteorName);
+                            if (go != null) { Singleton<MeteorManager>.getInstance().remove(go); sRemoved = true; sStepT = 0f; }
+                        }
+                    }
+                    else if (sRemoved)
+                    {
+                        if (!ParseEntries(Get(sRemote, "meteors")).ContainsKey(sMeteorName.Replace(' ', '_')) && sT - sRemoteAt < 1f && sStepT > 0.5f)
+                        { Check("meteor removed on the host (laser) is gone on the joiner", true); Next(); }
+                        else if (sStepT > 6f) { Check("meteor removed on the host is gone on the joiner", false, Get(sRemote, "meteors")); Next(); }
+                    }
+                    else if (sStepT > 8f) { Check("second meteor reached the joiner", false); Next(); }
+                    break;
+                case 45: // a meteor on a module: damage comes from the host only (one notification on the joiner)
+                    LogMeteors();
+                    if (!sAimed)
+                    {
+                        // gravity bends a meteor's path, so it lands off its target. The same seed flies
+                        // the same path shifted by the target: measure the last miss, aim that much off.
+                        var last = MeteorObjects().FirstOrDefault(g => g.name == sAimName);
+                        if (last != null && last.GetComponent<Rigidbody>() == null)
+                        {
+                            Vector3 miss = last.transform.position - sAimTarget;
+                            miss.y = 0f;
+                            var mm = Singleton<MeteorManager>.getInstance();
+                            ((List<int>)fMeteorSeedList.GetValue(mm)).Insert(0, sAimSeed);
+                            sHitText = StringList.get("message_meteor_hit", sM1.getName());
+                            sAimTarget = sM1.getPosition() - miss;
+                            mm.spawnMeteor(sAimTarget);
+                            sAimName = MeteorObjects().Last().name;
+                            sAimed = true;
+                            sAimTries++;
+                            sStepT = 0f;
+                            Log.Info($"bot: meteor try {sAimTries} aimed at {sM1.getName()} {sM1.getPosition()} (miss of the same seed: {miss})");
+                        }
+                        else Timeout(25, "previous meteor landed");
+                        return;
+                    }
+                    {
+                        int hostHits = Count(Get(LocalDigest(), "msgs"), sHitText), joinerHits = Count(Get(sRemote, "msgs"), sHitText);
+                        var cur = MeteorObjects().FirstOrDefault(g => g.name == sAimName);
+                        bool landed = cur != null && cur.GetComponent<Rigidbody>() == null;
+                        if (hostHits > 0 && sStepT > 6f)
+                        {
+                            Check("meteor hit: the joiner shows the host's notification once (no local damage)", joinerHits == hostHits, $"host {hostHits} joiner {joinerHits}, try {sAimTries}");
+                            Next();
+                        }
+                        else if (hostHits == 0 && landed && sStepT > 4f)
+                        {
+                            if (sAimTries < 4) sAimed = false;   // landed beside it: correct the aim
+                            else { Check("meteor hit the module on the host", false, "missed 4 times"); Next(); }
+                        }
+                        else if (sStepT > 25f) { Check("meteor hit the module on the host", false, "no landing"); Next(); }
+                    }
+                    break;
+                case 46: // sandstorm starts and ends on the joiner with the host's
+                    if (First()) { Singleton<DisasterManager>.getInstance().getSandstorm().trigger(); return; }
+                    if (Get(sRemote, "storms").StartsWith("1:") && Get(sRemote, "sandfx") == "1" && sT - sRemoteAt < 1f)
+                    {
+                        Check("sandstorm shows on the joiner (state and particles)", true, Get(sRemote, "storms"));
+                        var ss = Singleton<DisasterManager>.getInstance().getSandstorm();
+                        fSandTime.SetValue(ss, (float)fSandDuration.GetValue(ss) + 1f);   // ends on the next host update
+                        Next();
+                    }
+                    else if (sStepT > 8f) { Check("sandstorm shows on the joiner", false, $"storms {Get(sRemote, "storms")} fx {Get(sRemote, "sandfx")}"); Next(); }
+                    break;
+                case 47:
+                    if (Get(sRemote, "storms").StartsWith("0:") && Get(sRemote, "sandfx") == "0" && sT - sRemoteAt < 1f && sStepT > 0.5f)
+                    {
+                        string txt = StringList.get("message_sandstorm_now");
+                        int h = Count(Get(LocalDigest(), "msgs"), txt), j = Count(Get(sRemote, "msgs"), txt);
+                        Check("sandstorm ends on the joiner; its notification shown once", h == j && h > 0, $"host {h} joiner {j}");
+                        Next();
+                    }
+                    else if (sStepT > 8f) { Check("sandstorm ends on the joiner", false, Get(sRemote, "storms")); Next(); }
+                    break;
+                case 48: // shared trade basket
+                    if (First())
+                    {
+                        sPad1 = PlaceAndBuild("ModuleTypeLandingPad", 2, sBase, 40f);
+                        sShip = LandingShip.create<MerchantShip>(sPad1, LandingShip.Size.Regular);
+                        sMerchantWaiting = true;
+                        return;
+                    }
+                    if (sMerchantWaiting && sShip is MerchantShip ms0 && ms0.canTrade())
+                    {
+                        sMerchantWaiting = false;
+                        GameAccess.Gui().setWindow(new GuiMerchantWindow(ms0));   // host opens the window
+                        SendProbe("do", "trade-open " + ms0.getId());              // so does the joiner
+                        sStepT = 0f;
+                        return;
+                    }
+                    if (!sMerchantWaiting && sStepT > 1.5f && sTradeStage == 0)
+                    {
+                        // host clicks a merchant item into the merchant's transaction box
+                        var win = TradeShare.OpenWindow;
+                        var stock = (ProductAmounts)fWinMStock.GetValue(win);
+                        Product first = null;
+                        foreach (var pa in stock) if (pa.getAmount() > 0) { first = pa.getProduct(); break; }
+                        Event.current = new Event();
+                        win.onMerchantStockClicked(first);
+                        sTradeStage = 1; sStepT = 0f;
+                        return;
+                    }
+                    if (sTradeStage == 1)
+                    {
+                        string mine = TradeShare.Digest(TradeShare.OpenWindow);
+                        if (Get(sRemote, "tradewin") == mine && sT - sRemoteAt < 1f) { Check("host's click shows in the joiner's trade window", true, mine); SendProbe("do", "trade-fill-base"); sTradeStage = 2; sStepT = 0f; }
+                        else if (sStepT > 8f) { Check("host's click shows in the joiner's trade window", false, $"host {mine} joiner {Get(sRemote, "tradewin")}"); sTradeStage = 2; sStepT = 0f; SendProbe("do", "trade-fill-base"); }
+                        return;
+                    }
+                    if (sTradeStage == 2)
+                    {
+                        string mine = TradeShare.Digest(TradeShare.OpenWindow);
+                        int marked = Registry.Resources.Count(x => x != null && (int)fTraderId.GetValue(x) == sShip.getId());
+                        bool hasBase = mine.Split('|').Length == 3 && mine.Split('|')[2] != "";
+                        if (hasBase && Get(sRemote, "tradewin") == mine && sT - sRemoteAt < 1f)
+                        { Check("joiner's clicks show in the host's trade window (host marks the resources)", marked > 0 || mine.Contains("Coins"), $"{mine}, {marked} marked"); SendProbe("do", "trade-commit"); sTradeStage = 3; sStepT = 0f; }
+                        else if (sStepT > 8f) { Check("joiner's clicks show in the host's trade window", false, $"host {mine} joiner {Get(sRemote, "tradewin")}"); Next(); }
+                        return;
+                    }
+                    if (sTradeStage == 3)
+                    {
+                        var m = (MerchantShip)sShip;
+                        bool agreed = Convert.ToInt32(fTradeState.GetValue(m)) == 1 && fNeeded.GetValue(m) != null;
+                        if (agreed && TradeShare.OpenWindow == null) { Check("joiner's Trade commits the shared basket; the host's window closes", true); Next(); }
+                        else if (sStepT > 10f) { Check("joiner's Trade commits the shared basket", false, $"agreed {agreed}, host window {(TradeShare.OpenWindow != null ? "open" : "closed")}"); Next(); }
+                        return;
+                    }
+                    if (sMerchantWaiting) Timeout(150, "merchant ship ready to trade");
+                    break;
+                case 49: // a game error on the joiner no longer ends its game; the host's log gets it
+                    if (First()) { sReceivedBefore = ErrorGuard.Received; SendProbe("do", "log-error"); return; }
+                    if (ErrorGuard.Received > sReceivedBefore && Get(sRemote, "fatal") == "none" && sT - sRemoteAt < 1f && sStepT > 1f)
+                    { Check("joiner error caught (no fatal screen), reported to the host", true, Get(sRemote, "caught") + " caught"); Next(); }
+                    else if (sStepT > 10f) { Check("joiner error caught and reported", false, $"received {ErrorGuard.Received - sReceivedBefore}, fatal '{Get(sRemote, "fatal")}'"); Next(); }
+                    break;
+                case 50: // the joiner clicks through every object and window while the host plays at speed
+                    if (First())
+                    {
+                        sCaughtBefore = int.TryParse(Get(sRemote, "caught"), out var c0) ? c0 : 0;
+                        sReceivedBefore = ErrorGuard.Received;
+                        var tm = Singleton<TimeManager>.getInstance();
+                        tm.unpause();
+                        tm.increaseSpeed(); tm.increaseSpeed();
+                        SendProbe("do", "crawl 60");
+                        return;
+                    }
+                    if (Get(sRemote, "crawl").StartsWith("done") && sT - sRemoteAt < 1f)
+                    {
+                        int caught = (int.TryParse(Get(sRemote, "caught"), out var c1) ? c1 : 0) - sCaughtBefore;
+                        Check("joiner UI crawl: no game errors", caught == 0 && Get(sRemote, "fatal") == "none", $"{Get(sRemote, "crawl")}; {caught} game errors (see host log for reports)");
+                        Singleton<TimeManager>.getInstance().setNormalSpeed();
+                        Next();
+                    }
+                    else Timeout(120, "joiner UI crawl finished");
+                    break;
+                case 51: // placement preview ("ghost"): the host's shows on the joiner, follows it, goes away
+                    if (First())
+                    {
+                        sModulesBefore = Module.getCount();
+                        sGhostSpot = FindLinkableSpot("ModuleTypeSolarPanel");
+                        var panel = TypeList<ModuleType, ModuleTypeList>.find("ModuleTypeSolarPanel");
+                        sHostPreview = Module.create(sGhostSpot, panel.getMinSize(), panel);
+                        sHostPreview.setValidPosition(true);
+                        fActiveModule.SetValue(GameAccess.Game(), sHostPreview);   // what tryPlaceModule leaves while you aim
+                        sGhostStage = 0;
+                        return;
+                    }
+                    {
+                        var g = ParseEntries(Get(sRemote, "ghosts"));
+                        bool fresh = sT - sRemoteAt < 1f;
+                        var at = sHostPreview != null ? sHostPreview.getPosition() : Vector3.zero;
+                        bool there = g.TryGetValue("0", out var e) && e[0] == "ModuleTypeSolarPanel" && e[4] == "1" &&
+                                     Mathf.Abs(float.Parse(e[2]) - at.x) < 0.3f && Mathf.Abs(float.Parse(e[3]) - at.z) < 0.3f;
+                        if (sGhostStage == 0 && there && fresh)
+                        {
+                            Check("host's placement preview shows on the joiner (type, place, green), not as a building",
+                                Get(sRemote, "ids.Module") == Get(LocalDigest(), "ids.Module"), Get(sRemote, "ghosts"));
+                            sHostPreview.setPosition(at + new Vector3(6f, 0f, 0f));
+                            sHostPreview.setValidPosition(false);
+                            sGhostStage = 1; sStepT = 0f;
+                        }
+                        else if (sGhostStage == 1 && fresh && g.TryGetValue("0", out var e1) && e1[4] == "0" && Mathf.Abs(float.Parse(e1[2]) - at.x) < 0.3f)
+                        {
+                            Check("the joiner's copy follows the host's preview (moved, turned red)", true, Get(sRemote, "ghosts"));
+                            sHostPreview.destroy();
+                            sHostPreview = null;
+                            fActiveModule.SetValue(GameAccess.Game(), null);
+                            sGhostStage = 2; sStepT = 0f;
+                        }
+                        else if (sGhostStage == 2 && fresh && !g.ContainsKey("0") && sStepT > 0.3f)
+                        {
+                            Check("host's preview gone: gone on the joiner", Module.getCount() == sModulesBefore, Get(sRemote, "ghosts"));
+                            Next();
+                        }
+                        else if (sStepT > 8f) { Check("host's placement preview on the joiner (stage " + sGhostStage + ")", false, "joiner ghosts: " + Get(sRemote, "ghosts")); Next(); }
+                    }
+                    break;
+                case 52: // the joiner's preview shows on the host; the joiner builds right where its ghost is
+                    if (First())
+                    {
+                        sModulesBefore = Module.getCount();
+                        sGhostSpot = FindLinkableSpot("ModuleTypeWaterExtractor");
+                        SendProbe("do", $"ghost-start ModuleTypeWaterExtractor {sGhostSpot.x:F2} {sGhostSpot.z:F2}");
+                        sGhostStage = 0;
+                        return;
+                    }
+                    {
+                        string mine = Ghosts.Digest();
+                        if (sGhostStage == 0 && mine.Contains(":ModuleTypeWaterExtractor:") && mine.EndsWith(":1"))
+                        {
+                            var e = mine.Split(':');
+                            bool near = Mathf.Abs(float.Parse(e[3]) - sGhostSpot.x) < 0.3f && Mathf.Abs(float.Parse(e[4]) - sGhostSpot.z) < 0.3f;
+                            Check("joiner's placement preview shows on the host, not as a building", near && Module.getCount() == sModulesBefore, mine);
+                            SendProbe("do", "ghost-commit");
+                            sGhostStage = 1; sStepT = 0f;
+                        }
+                        else if (sGhostStage == 1 && Module.getCount() == sModulesBefore + 1 && Ghosts.Digest() == "")
+                        {
+                            bool atSpot = Registry.Constructions.OfType<Module>().Any(m => m.getModuleType() is ModuleTypeWaterExtractor && (m.getPosition() - sGhostSpot).magnitude < 1f);
+                            Check("joiner builds where its ghost was shown (the ghost blocks nothing); ghost removed", atSpot);
+                            sStep = 14; sEntered = false; sStepT = 0;
+                        }
+                        else if (sStepT > 10f) { Check("joiner's placement preview on the host (stage " + sGhostStage + ")", false, $"host ghosts '{mine}', modules {Module.getCount() - sModulesBefore} new, last result {Commands.LastResult}"); sStep = 14; sEntered = false; sStepT = 0; }
+                    }
                     break;
                 case 6: // T2: host builds a module, joiner sees it
                     if (First())
@@ -438,6 +763,57 @@ namespace PlanetbaseCoop
                     else Timeout(20, "joiner left");
                     break;
             }
+        }
+
+        private static Module sAccu, sTank, sHostPreview;
+        private static Vector3 sGhostSpot;
+        private static int sGhostStage;
+        private static string sMeteorName, sHitText;
+        private static bool sRemoved, sAimed;
+        private static int sAimSeed, sAimTries;
+        private static Vector3 sAimTarget;
+        private static string sAimName;
+        private static readonly FieldInfo fMeteorSeedList = AccessTools.Field(typeof(MeteorManager), "mSeeds");
+        private static int sTradeStage, sReceivedBefore, sCaughtBefore;
+        private static readonly FieldInfo fTraderId = AccessTools.Field(typeof(Resource), "mTraderId");
+
+        private static float sMeteorLogT;
+        private static void LogMeteors()
+        {
+            if (sT - sMeteorLogT < 0.5f) return;
+            sMeteorLogT = sT;
+            Log.Info($"meteors t={sStepT:F1} timeScale={Time.timeScale} host: " + string.Join(" ", MeteorObjects().Select(g =>
+            {
+                var rb = g.GetComponent<Rigidbody>();
+                return $"{g.name}@{g.transform.position} v={(rb != null ? rb.velocity.ToString() : "none")} grav={(rb != null && rb.useGravity)}";
+            })) + " | joiner: " + Get(sRemote, "meteors") + (sM1 != null ? $" | target {sM1.getPosition()} cond {BuildRec.ConditionIndicator(sM1)?.getValue():F2}" : ""));
+        }
+
+        private static int Count(string hay, string needle)
+        {
+            if (string.IsNullOrEmpty(needle)) return 0;
+            int n = 0, i = 0;
+            while ((i = hay.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+            return n;
+        }
+
+        // host and joiner stored amounts match (ratio within 0.01) and the joiner's model shows its amount
+        private static bool StoresMatch(bool last, string name)
+        {
+            var mine = ParseEntries(Get(LocalDigest(), "stores"));
+            var theirs = ParseEntries(Get(sRemote, "stores"));
+            var bad = new List<string>();
+            foreach (var id in new[] { sAccu.getId().ToString(), sTank.getId().ToString() })
+            {
+                if (!mine.TryGetValue(id, out var m) || !theirs.TryGetValue(id, out var t)) { bad.Add(id + " missing"); continue; }
+                float hp = float.Parse(m[0]), hw = float.Parse(m[1]), jp = float.Parse(t[0]), jw = float.Parse(t[1]), jg = float.Parse(t[2]), jt = float.Parse(t[3]);
+                if (Mathf.Abs(hp - jp) > 0.01f || Mathf.Abs(hw - jw) > 0.01f) bad.Add($"{id} amount host {hp:F3}/{hw:F3} joiner {jp:F3}/{jw:F3}");
+                if (jg >= 0f && hp >= 0f && Mathf.Abs(jg - jp) > 0.01f) bad.Add($"{id} gauge {jg:F3} vs {jp:F3}");
+                if (jt >= 0f && hw >= 0f && Mathf.Abs(jt - jw) > 0.01f) bad.Add($"{id} tank {jt:F3} vs {jw:F3}");
+            }
+            if (bad.Count == 0 && sT - sRemoteAt < 1f) { Check(name, true, Get(sRemote, "stores")); return true; }
+            if (last) { Check(name, false, string.Join("; ", bad) + " | joiner " + Get(sRemote, "stores")); return true; }
+            return false;
         }
 
         private static bool WaitMatch(Kind[] kinds, float timeout, string name, Func<bool> hostCond = null)
@@ -600,7 +976,37 @@ namespace PlanetbaseCoop
                     }
             }
             finally { probe.destroy(); }
+            Log.Warn($"bot: no free spot for {typeName} near {near}; using a fallback that may be blocked");
             return near + new Vector3(minDist, 0, 0);
+        }
+
+        // A spot a player could really use: new modules must link to a module that already has a
+        // link (Connection.canLink), and the bot's extra test buildings have none. So search finely
+        // around linked modules, keeping the usual margin from ships and resources.
+        private static Vector3 FindLinkableSpot(string typeName)
+        {
+            var type = TypeList<ModuleType, ModuleTypeList>.find(typeName);
+            int size = type.getMinSize();
+            float floor = Singleton<TerrainGenerator>.getInstance().getFloorHeight();
+            var probe = Module.create(sBase, size, type);
+            try
+            {
+                foreach (var anchor in Registry.Constructions.OfType<Module>().Where(m => m.getLinkCount() > 0).ToList())
+                    for (float r = 8f; r < 45f; r += 1f)
+                        for (int a = 0; a < 48; a++)
+                        {
+                            float ang = a * Mathf.PI * 2f / 48f;
+                            var p = new Vector3(anchor.getPosition().x + Mathf.Cos(ang) * r, floor, anchor.getPosition().z + Mathf.Sin(ang) * r);
+                            probe.setPosition(p);
+                            if (!probe.canPlaceModule(p, Vector3.up, Module.ValidSizes[size])) continue;
+                            float half = Module.ValidSizes[size] * 0.5f;
+                            if (Physics.CheckSphere(p, half + 13f, 65536) || Physics.CheckSphere(p, half + 5f, 1024)) continue;
+                            return p;
+                        }
+            }
+            finally { probe.destroy(); }
+            Log.Warn("bot: no linkable spot for " + typeName);
+            return sBase;
         }
 
         private static Module PlaceAndBuild(string typeName, int size, Vector3 near, float minDist, bool build = true)
@@ -695,6 +1101,7 @@ namespace PlanetbaseCoop
                         return;
                     }
                     while (sClientQueue.Count > 0) ClientDo(sClientQueue.Dequeue());
+                    if (sCrawlLeft > 0f) CrawlStep(dt);
                     sDigestTimer += dt;
                     if (sDigestTimer >= 0.5f) { sDigestTimer = 0; SendProbe("digest", Encode(LocalDigest())); }
                     if (sClientEnd)
@@ -759,6 +1166,64 @@ namespace PlanetbaseCoop
                     win.destroy();
                     break;
                 }
+                case "trade-open":
+                {
+                    var ship = Registry.Find(Kind.Ship, int.Parse(a[1])) as MerchantShip;
+                    if (ship != null) GameAccess.Gui().setWindow(new GuiMerchantWindow(ship));
+                    else Log.Warn("bot: no merchant ship " + a[1]);
+                    break;
+                }
+                case "trade-fill-base":
+                {
+                    // click base items into the base's box (the window's own button handler) until the
+                    // basket pays for the merchant side
+                    var win = TradeShare.OpenWindow;
+                    if (win == null) { Log.Warn("bot: no trade window"); break; }
+                    var ship = TradeShare.ShipOf(win);
+                    float need = ((ProductAmounts)fWinMTrade.GetValue(win)).getValue() * (1f + (int)fCommission.GetValue(ship) / 100f) + 1f;
+                    for (int guard = 0; guard < 200 && ((ProductAmounts)fWinBTrade.GetValue(win)).getValue() < need; guard++)
+                    {
+                        Product pick = null;
+                        foreach (var pa in (ProductAmounts)fWinBStock.GetValue(win)) if (pa.getAmount() > 0) { pick = pa.getProduct(); break; }
+                        if (pick == null) break;
+                        int before = ((ProductAmounts)fWinBTrade.GetValue(win)).getTotalAmount();
+                        Event.current = new Event();
+                        win.onBaseStockClicked(pick);
+                        if (((ProductAmounts)fWinBTrade.GetValue(win)).getTotalAmount() == before) break;
+                    }
+                    Log.Info("bot: base basket " + TradeShare.Digest(win));
+                    break;
+                }
+                case "trade-commit":
+                {
+                    var win = TradeShare.OpenWindow;
+                    if (win == null) { Log.Warn("bot: no trade window to commit"); break; }
+                    win.onTrade(null);   // Trade button: closes the window through the game's own path
+                    if (GameAccess.Gui().getWindow() == win) GameAccess.Gui().setWindow(null);
+                    break;
+                }
+                case "ghost-start":
+                {
+                    var type = TypeList<ModuleType, ModuleTypeList>.find(a[1]);
+                    float floor = Singleton<TerrainGenerator>.getInstance().getFloorHeight();
+                    var pos = new Vector3(float.Parse(a[2]), floor, float.Parse(a[3]));
+                    var preview = Module.create(pos, type.getMinSize(), type);
+                    preview.setValidPosition(preview.canPlaceModule(pos, Vector3.up, Module.ValidSizes[type.getMinSize()]));
+                    fActiveModule.SetValue(game, preview);
+                    Log.Info("bot: joiner preview at " + pos + " valid " + preview.isValidPosition() + (preview.isValidPosition() ? "" : ": " + PlacementDiag.Why(preview, pos)));
+                    break;
+                }
+                case "ghost-commit":
+                    mPlaceModule.Invoke(game, null);   // the click: PlaceModulePrefix sends it, drops the preview
+                    break;
+                case "log-error":
+                    Debug.LogError("coop test: deliberate error to check the error guard");
+                    break;
+                case "crawl":
+                    sCrawlLeft = float.Parse(a[1]);
+                    sCrawlReport = "running";
+                    sCrawlI = 0; sCrawlSel = 0; sCrawlWin = 0; sCrawlWinT = 0f; sCrawlBotErrors = 0; sCrawlFirstError = null;
+                    break;
                 case "toggle-merchants":
                 {
                     var rb = Singleton<LandingShipManager>.getInstance().getLandingPermissions().getMerchantRefBool();
@@ -776,6 +1241,63 @@ namespace PlanetbaseCoop
                     else sDropped = "none";
                     break;
                 }
+            }
+        }
+
+        // ------------------------------------------------------------ joiner UI crawl
+        // Select every object in turn (info panel, menus) and open every main window, a few frames
+        // each, like a player clicking around while the host plays. Game errors land in ErrorGuard.
+        private static float sCrawlLeft, sCrawlSelT, sCrawlWinT;
+        private static int sCrawlI, sCrawlSel, sCrawlWin, sCrawlBotErrors;
+        private static string sCrawlReport = "", sCrawlFirstError;
+        private static readonly Type[] CrawlWindows =
+        {
+            typeof(GuiStatsWindow), typeof(GuiChartsWindow), typeof(GuiGridWindow), typeof(GuiTechsWindow),
+            typeof(GuiMilestonesWindow), typeof(GuiSecurityWindow), typeof(GuiManufactureLimitsWindow),
+        };
+
+        private static void CrawlStep(float dt)
+        {
+            sCrawlLeft -= dt;
+            sCrawlSelT += dt;
+            sCrawlWinT += dt;
+            try
+            {
+                if (sCrawlSelT >= 0.2f)
+                {
+                    sCrawlSelT = 0f;
+                    var all = new List<Selectable>();
+                    foreach (var k in Registry.All)
+                    {
+                        Registry.Collect(k, sScratch);
+                        all.AddRange(sScratch.Values.OfType<Selectable>());
+                    }
+                    if (all.Count > 0)
+                    {
+                        var s = all[sCrawlI++ % all.Count];
+                        Selection.select(s);
+                        sCrawlSel++;
+                    }
+                }
+                if (sCrawlWinT >= 2f)
+                {
+                    sCrawlWinT = 0f;
+                    var t = CrawlWindows[sCrawlWin++ % CrawlWindows.Length];
+                    GameAccess.Gui().setWindow((GuiWindow)Activator.CreateInstance(t));
+                }
+            }
+            catch (Exception e)
+            {
+                sCrawlBotErrors++;
+                sCrawlFirstError = sCrawlFirstError ?? e.GetType().Name + ": " + e.Message;
+                Log.Warn("crawl: " + e);
+            }
+            if (sCrawlLeft <= 0f)
+            {
+                sCrawlLeft = 0f;
+                try { GameAccess.Gui().setWindow(null); Selection.clear(); } catch { }
+                sCrawlReport = $"done: {sCrawlSel} selections, {sCrawlWin} windows, {sCrawlBotErrors} bot-call errors" + (sCrawlFirstError != null ? " (first: " + sCrawlFirstError + ")" : "");
+                Log.Info("crawl " + sCrawlReport);
             }
         }
 

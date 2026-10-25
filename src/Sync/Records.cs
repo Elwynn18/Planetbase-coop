@@ -83,6 +83,8 @@ namespace PlanetbaseCoop.Sync
         public bool Powered;      // constructions only
         public bool Water;        // constructions only
         public int ProducedItem;  // components only
+        public float PowerStored; // accumulators only, else -1
+        public float WaterStored; // water tanks only, else -1
 
         private static readonly FieldInfo fProgress = AccessTools.Field(typeof(Buildable), "mBuildProgress");
         private static readonly FieldInfo fEnabled = AccessTools.Field(typeof(Buildable), "mEnabled");
@@ -107,12 +109,19 @@ namespace PlanetbaseCoop.Sync
                 HighPriority = b.isHighPriority(),
                 Condition = ConditionIndicator(b)?.getValue() ?? 1f,
                 ProducedItem = -1,
+                PowerStored = -1f,
+                WaterStored = -1f,
             };
             if (b is Construction c)
             {
                 rec.Oxygen = ((Indicator)fOxygen.GetValue(c)).getValue();
                 rec.Powered = c.isPowered();
                 rec.Water = c.hasWater();
+                if (c is Module m)
+                {
+                    rec.PowerStored = m.getPowerStorageIndicator()?.getValue() ?? -1f;
+                    rec.WaterStored = m.getWaterStorageIndicator()?.getValue() ?? -1f;
+                }
             }
             else if (b is ConstructionComponent cc && fProduced != null)
             {
@@ -124,18 +133,24 @@ namespace PlanetbaseCoop.Sync
         public bool SameAs(BuildRec o) =>
             o.Id == Id && o.State == State && Mathf.Abs(o.Progress - Progress) < 0.002f && o.Enabled == Enabled &&
             o.HighPriority == HighPriority && Mathf.Abs(o.Condition - Condition) < 0.005f && Mathf.Abs(o.Oxygen - Oxygen) < 0.005f &&
-            o.Powered == Powered && o.Water == Water && o.ProducedItem == ProducedItem;
+            o.Powered == Powered && o.Water == Water && o.ProducedItem == ProducedItem &&
+            CloseStored(o.PowerStored, PowerStored) && CloseStored(o.WaterStored, WaterStored);
+
+        // stored amounts are large (an accumulator holds millions); 0.2 % of the value is plenty
+        private static bool CloseStored(float a, float b) => Mathf.Abs(a - b) <= 0.002f * Mathf.Max(Mathf.Abs(a), Mathf.Abs(b)) + 1f;
 
         public void Write(BinaryWriter w)
         {
             w.Write(Id); w.Write(State); w.Write(Progress); w.Write(Enabled); w.Write(HighPriority);
             w.Write(Condition); w.Write(Oxygen); w.Write(Powered); w.Write(Water); w.Write(ProducedItem);
+            w.Write(PowerStored); w.Write(WaterStored);
         }
 
         public static BuildRec Read(BinaryReader r) => new BuildRec
         {
             Id = r.ReadInt32(), State = r.ReadByte(), Progress = r.ReadSingle(), Enabled = r.ReadBoolean(), HighPriority = r.ReadBoolean(),
             Condition = r.ReadSingle(), Oxygen = r.ReadSingle(), Powered = r.ReadBoolean(), Water = r.ReadBoolean(), ProducedItem = r.ReadInt32(),
+            PowerStored = r.ReadSingle(), WaterStored = r.ReadSingle(),
         };
 
         public static int ProducedItemOf(ConstructionComponent cc) => fProduced == null ? -1 : (int)fProduced.GetValue(cc);

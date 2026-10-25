@@ -191,6 +191,7 @@ namespace PlanetbaseCoop
             }
             mCancelTrade.Invoke(__instance, null);   // undo the local marks
             Singleton<TimeManager>.getInstance().unpause();
+            TradeShare.OnJoinerClosed(__instance);
             return false;
         }
 
@@ -200,18 +201,32 @@ namespace PlanetbaseCoop
             int result = r.ReadInt32();
             string xb = r.ReadString(), xm = r.ReadString();
             if (ship == null) return "The merchant ship has left.";
-            if (result == 1) { ship.dismiss(); return null; }
+            TradeShare.BeforeJoinerTrade(ship.getId());   // the host's own window on this ship lets go of it
+            if (result == 1) { ship.dismiss(); TradeShare.AfterJoinerTrade(ship.getId()); return null; }
             if (!ship.canTrade()) return "Someone else is trading with this ship right now.";
             var baseTrade = new ProductAmounts();
             var merchantTrade = new ProductAmounts();
             Registry.XmlIn(xb, root => baseTrade.deserialize(root.FirstChild));
             Registry.XmlIn(xm, root => merchantTrade.deserialize(root.FirstChild));
             ship.startTrading();
+            var marked = new System.Collections.Generic.List<Product>();
             foreach (var pa in baseTrade)
                 for (int i = 0; i < pa.getAmount(); i++)
-                    if (!pa.getProduct().markForTrading(ship)) { ship.cancelTrading(); Resource.unmarkForTrading(ship.getId()); return "The base no longer has what you offered."; }
+                {
+                    if (!pa.getProduct().markForTrading(ship)) { Unmark(ship, marked); ship.cancelTrading(); return "The base no longer has what you offered."; }
+                    marked.Add(pa.getProduct());
+                }
             ship.onTradeAgreed(baseTrade, merchantTrade);
+            TradeShare.AfterJoinerTrade(ship.getId());
             return null;
+        }
+
+        // undo the marks made so far, one by one like the window's cancel (coins and other
+        // inmaterial resources are given back only this way)
+        private static void Unmark(MerchantShip ship, System.Collections.Generic.List<Product> marked)
+        {
+            int id = ship.getId();
+            foreach (var p in marked) p.unmarkForTrading(id);
         }
 
         public static bool KindOf(Selectable s, out Kind kind)

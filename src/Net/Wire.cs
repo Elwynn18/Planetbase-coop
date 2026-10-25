@@ -27,11 +27,18 @@ namespace PlanetbaseCoop.Net
         TestProbe = 17,     // test bots only: world digests exchanged between bots
         Settings = 18,      // host -> client: landing permissions, manufacture limits
         GameMessage = 19,   // host -> client: a notification added to the host's message log
+        TradeBasket = 20,   // both ways: what sits in a merchant window's two transaction boxes
+        TradeView = 21,     // client -> host: merchant window opened / closed
+        TradeEnd = 22,      // host -> client: trade done or abandoned, close that merchant window
+        Hazard = 23,        // host -> client: meteor / lightning spawned (seed + target) or removed
+        Disasters = 24,     // host -> client: sandstorm, blizzard and solar flare state
+        ErrorReport = 25,   // client -> host: a game error caught on the joiner, for the host's log
+        Ghost = 26,         // both ways: a player's module placement preview (or none)
     }
 
     public static class Wire
     {
-        public const int ProtocolVersion = 1;
+        public const int ProtocolVersion = 2;
         public const int MaxMessage = 64 * 1024 * 1024;
 
         public static byte[] Build(Msg type, Action<BinaryWriter> body)

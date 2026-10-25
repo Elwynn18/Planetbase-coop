@@ -11,7 +11,7 @@ namespace PlanetbaseCoop
     {
         public const string Guid = "planetbase.coop";
         public const string Name = "Planetbase Co-op";
-        public const string Version = "0.1.0";
+        public const string Version = "0.2.0";
 
         public static Plugin Instance;
         public static Harmony Harmony;
@@ -38,6 +38,11 @@ namespace PlanetbaseCoop
                 Mirror.Patch(Harmony);
                 Commands.Patch(Harmony);
                 Sync.Messages.Patch(Harmony);
+                Sync.Hazards.Patch(Harmony);
+                Sync.Hazards.Init();
+                Sync.ColonyStats.Init();
+                Sync.TradeShare.Patch(Harmony);
+                ErrorGuard.Patch(Harmony);
                 TestBot.Init();
                 sReady = true;
                 Log.Info("Plugin ready");
@@ -78,7 +83,7 @@ namespace PlanetbaseCoop
         private void OnGUI()
         {
             if (!sReady) return;
-            try { Ui.OnGUI(); }
+            try { Ui.OnGUI(); Sync.Ghosts.OnGUI(); }
             catch (Exception e) { Log.Error("OnGUI: " + e); }
         }
 

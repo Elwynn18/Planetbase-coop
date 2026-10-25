@@ -32,6 +32,8 @@ CASES = [
     ("twin-no-notices", ["run", "pair", "scenario=ships", "mut=no-notices"], "host notification shown on the joiner"),
     ("twin-no-settings", ["run", "pair", "scenario=ships", "mut=no-settings"], "host's landing permission change reaches the joiner"),
     ("twin-no-edit-flush", ["run", "pair", "scenario=ships", "mut=no-edit-flush"], "joiner's landing permission change reaches the host"),
+    ("hazards", ["run", "pair", "scenario=hazards"], "pass"),
+    ("twin-no-error-guard", ["run", "pair", "scenario=hazards", "mut=no-error-guard"], "joiner error caught"),
 ]
 LANES = [("a", "b", "47610"), ("c", "d", "47620")]
 
