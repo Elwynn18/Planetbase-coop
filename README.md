@@ -27,8 +27,8 @@ first playtest by two people over Steam (version 0.1.0; its bugs are fixed in 0.
 One file per system does everything: finds Steam and Planetbase (in any Steam library), checks the
 game version, installs BepInEx (official archive, SHA-256 checked), installs the mod or replaces it
 with the latest version (SHA-256 checked, the previous version kept in `BepInEx/coop-backup/`), and
-offers to start the game. **To update later, run it again.** It also updates itself. Its messages are
-in French.
+offers to start the game. **To update later, run it again.** When a newer version of the script itself exists, it says so
+and asks before replacing itself (with `--yes`/`-Yes` it only says so). Its messages are in French.
 
 **Windows:** download [`install/Planetbase-Coop.bat`](install/Planetbase-Coop.bat) (on that page:
 "Download raw file") and double-click it. Windows may warn that the file comes from the internet

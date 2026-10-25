@@ -19,7 +19,7 @@ exit /b
 # Options (en ligne de commande) : install | uninstall  -GameDir <dossier>  -Yes  -NoLaunch
 # ---------------------------------------------------------------------------------------------
 
-$InstallerVersion = 1
+$InstallerVersion = 2
 $AppId = 403190
 $Source = 'https://raw.githubusercontent.com/Elwynn18/Planetbase-coop/main'
 if ($env:COOP_SOURCE) { $Source = $env:COOP_SOURCE }
@@ -202,7 +202,9 @@ function Self-Update {
     if ($env:COOP_NO_SELF_UPDATE -or -not $env:COOP_SELF) { return }
     $latest = 0; [void][int]::TryParse([string]$Man['installer_version'], [ref]$latest)
     if ($latest -le $InstallerVersion -or -not $Man['installer_bat'] -or -not $Man['installer_bat_sha256']) { return }
-    Info "Une nouvelle version de ce script existe (v$latest). Mise à jour du script…"
+    Info "Une nouvelle version de ce script existe " "(v$latest ; celui-ci : v$InstallerVersion)"
+    if ($AssumeYes) { Sub 'Mode automatique : je garde ce script. Pour le mettre à jour, relancez-le sans -Yes.'; return }
+    if (-not (Ask 'Mettre ce script à jour avant de continuer ?' 'o')) { Sub "Ce script reste en v$InstallerVersion. Nouvelle version : $Page"; return }
     try {
         $f = Join-Path $Tmp 'new.bat'
         Fetch "$Source/$($Man['installer_bat'])" $f

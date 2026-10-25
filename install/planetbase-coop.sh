@@ -4,7 +4,8 @@
 #   bash planetbase-coop.sh               menu (installer / mettre à jour, désinstaller)
 #   bash planetbase-coop.sh install       installe ou met à jour sans menu
 #   bash planetbase-coop.sh uninstall     désinstalle
-#   Options : --game-dir <dossier>  --yes (répond par défaut à tout)  --no-launch  --no-self-update
+#   Options : --game-dir <dossier>  --yes (répond par défaut à tout)  --no-launch
+#             --no-self-update (ne vérifie pas si une nouvelle version du script existe)
 #
 # Ce que fait le script : trouve Steam et Planetbase, vérifie la version du jeu, installe BepInEx
 # (archive officielle, empreinte SHA-256 vérifiée), installe ou remplace le mod par la dernière
@@ -13,7 +14,7 @@
 # au fichier localconfig.vdf de Steam (sauvegardé avant).
 set -uo pipefail
 
-INSTALLER_VERSION=1
+INSTALLER_VERSION=2
 APP_ID=403190
 SOURCE="${COOP_SOURCE:-https://raw.githubusercontent.com/Elwynn18/Planetbase-coop/main}"
 PAGE="https://github.com/Elwynn18/Planetbase-coop"
@@ -32,7 +33,7 @@ while [ $# -gt 0 ]; do
     --yes|-y) ASSUME_YES=1 ;;
     --no-launch) NO_LAUNCH=1 ;;
     --no-self-update) NO_SELF_UPDATE=1 ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Argument inconnu : $1 (voir --help)"; exit 2 ;;
   esac
   shift
@@ -207,10 +208,19 @@ read_manifest() {
 
 self_update() {
   [ $NO_SELF_UPDATE = 1 ] && return
+  # Une nouvelle version du script : on demande avant de remplacer ce fichier.
   local latest="${MAN[installer_version]:-0}" want="${MAN[installer_sh_sha256]:-}" path="${MAN[installer_sh]:-}"
   [ "$latest" -gt "$INSTALLER_VERSION" ] 2>/dev/null || return
   [ -n "$want" ] && [ -n "$path" ] || return
-  info "Une nouvelle version de ce script existe (v$latest). Mise à jour du script…"
+  info "Une nouvelle version de ce script existe ${D}(v$latest ; celui-ci : v$INSTALLER_VERSION)$R."
+  if [ $ASSUME_YES = 1 ]; then
+    sub "Mode automatique : je garde ce script. Pour le mettre à jour, relancez-le sans --yes."
+    return
+  fi
+  if ! ask "Mettre ce script à jour avant de continuer ?" o; then
+    sub "Ce script reste en v$INSTALLER_VERSION. Nouvelle version : $PAGE"
+    return
+  fi
   if fetch "$SOURCE/$path" "$TMP/new.sh" 2>>"$LOG" && [ "$(sha "$TMP/new.sh")" = "$want" ]; then
     if cp -f "$TMP/new.sh" "$0" 2>/dev/null; then
       ok "Script mis à jour, il redémarre."
