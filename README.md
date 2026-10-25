@@ -115,8 +115,10 @@ Joining loads the host's colony on the joiner. Then:
 
 ## Known issues
 
-- Steam invites have not been tested between two real accounts yet. If they fail, use the IP option.
-- Not played over the internet yet, and only tested with two players.
+- Steam invites worked in a real session between two PCs and two Steam accounts (host on Linux with
+  Proton, joiner on Windows, mod 0.1.0). Direct IP has only run in the lab (two copies on one PC); if it
+  fails between two PCs, use Steam.
+- Only tested with two players.
 - Lightning, blizzards and solar flares reach joiners through the same code as meteors and sandstorms,
   but only meteors and sandstorms have been tested so far.
 - The anti-meteor laser shoots meteors down for everyone, but joiners don't see its beam, only the
