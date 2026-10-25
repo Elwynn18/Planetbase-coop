@@ -25,7 +25,7 @@ namespace PlanetbaseCoop
             AudioListener.volume = 0f;
             if (TestEnv.Get("COOP_LOWGFX") == "1")
             {
-                // software rendering on Xvfb: cheapest settings
+                // cheapest settings: four copies share one PC in the test lab
                 QualitySettings.SetQualityLevel(0, true);
                 QualitySettings.vSyncCount = 0;
                 QualitySettings.antiAliasing = 0;
@@ -57,7 +57,7 @@ namespace PlanetbaseCoop
 
         private static readonly System.Collections.Generic.HashSet<int> sStripped = new System.Collections.Generic.HashSet<int>();
 
-        // COOP_NORENDER=1 (virtual screen, software GL): cameras draw nothing and their image effects
+        // COOP_NORENDER=1 (optional, e.g. software GL): cameras draw nothing and their image effects
         // are off. The game's logic, including code that uses Camera.main, still runs.
         private static void StripCameras()
         {

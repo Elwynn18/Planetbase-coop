@@ -26,7 +26,12 @@ CASES = [
     ("twin-no-char-states", ["run", "pair", "scenario=join", "mut=no-char-states"], "colonists are where the host has them"),
     ("twin-no-res-states", ["run", "pair", "scenario=join", "mut=no-res-states"], "resources have the same holder and place"),
     ("twin-no-census", ["run", "pair", "scenario=join", "mut=no-census"], "census restores the resource"),
+    ("twin-no-build-states", ["run", "pair", "scenario=join", "mut=no-build-states"], "construction state and progress match"),
     ("ships", ["run", "pair", "scenario=ships"], "pass"),
+    ("twin-no-ship-states", ["run", "pair", "scenario=ships", "mut=no-ship-states"], "landing ship position on the joiner"),
+    ("twin-no-notices", ["run", "pair", "scenario=ships", "mut=no-notices"], "host notification shown on the joiner"),
+    ("twin-no-settings", ["run", "pair", "scenario=ships", "mut=no-settings"], "host's landing permission change reaches the joiner"),
+    ("twin-no-edit-flush", ["run", "pair", "scenario=ships", "mut=no-edit-flush"], "joiner's landing permission change reaches the host"),
 ]
 LANES = [("a", "b", "47610"), ("c", "d", "47620")]
 

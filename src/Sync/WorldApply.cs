@@ -167,11 +167,17 @@ namespace PlanetbaseCoop.Sync
 
         private static void ApplyBuild(BuildRec rec)
         {
+            if (TestEnv.Mut("no-build-states")) return;
             var b = (Registry.Find(Kind.Module, rec.Id) ?? Registry.Find(Kind.Component, rec.Id)) as Buildable;
             if (b == null) return;
             var st = Registry.StateOf(b);
             var target = (BuildableState)rec.State;
-            if (st == BuildableState.Placed && (target == BuildableState.Building || target == BuildableState.Built)) { b.startBuilding(); st = BuildableState.Building; }
+            // The game drops a module from Building back to Placed whenever nobody works on it
+            // (Buildable.tick), keeping its progress. So progress applies in both states, and the
+            // Building/Placed flag itself is copied afterwards.
+            bool more = target == BuildableState.Built ||
+                        ((target == BuildableState.Building || target == BuildableState.Placed) && rec.Progress > BuildRec.ProgressOf(b) + 0.0001f);
+            if (st == BuildableState.Placed && more) { b.startBuilding(); st = BuildableState.Building; }
             if (st == BuildableState.Building)
             {
                 float cur = BuildRec.ProgressOf(b);
@@ -183,6 +189,10 @@ namespace PlanetbaseCoop.Sync
                     b.updateBuild((want - cur) * stages / 0.4f + (target == BuildableState.Built ? 1f : 0f));
                 }
             }
+            st = Registry.StateOf(b);
+            if (st != target && (st == BuildableState.Building || st == BuildableState.Placed) &&
+                (target == BuildableState.Building || target == BuildableState.Placed))
+                Registry.SetState(b, target);
             if (BuildRec.ConditionIndicator(b) is Indicator cond) cond.setValue(rec.Condition);
             if (b.isEnabled() != rec.Enabled) b.setEnabled(rec.Enabled);
             if (b is Construction c)
@@ -200,6 +210,7 @@ namespace PlanetbaseCoop.Sync
 
         private static void ApplyShip(ShipRec rec)
         {
+            if (TestEnv.Mut("no-ship-states")) return;
             if (!(Registry.Find(Kind.Ship, rec.Id) is Ship s)) { sShips.Remove(rec.Id); return; }
             ShipRec.ApplyState(s, rec.State);
             if ((s.getTransform().position - rec.Pos).sqrMagnitude > 400f) { s.getTransform().position = rec.Pos; s.getTransform().rotation = rec.Rot; }

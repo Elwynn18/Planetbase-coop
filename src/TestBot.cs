@@ -277,7 +277,9 @@ namespace PlanetbaseCoop
                     {
                         var e = ParseEntries(Get(sRemote, "ships"));
                         var mine = ShipRec.From(sShip);
-                        bool ok = e.TryGetValue(sShip.getId().ToString(), out var t) && Mathf.Abs(float.Parse(t[1]) - mine.Pos.x) < 1.5f &&
+                        // joiner must have the ship landed too (state record), at the host's place (position records)
+                        bool ok = e.TryGetValue(sShip.getId().ToString(), out var t) && int.Parse(t[0]) >= (int)LandingShip.State.Landed &&
+                                  Mathf.Abs(float.Parse(t[1]) - mine.Pos.x) < 1.5f &&
                                   Mathf.Abs(float.Parse(t[3]) - mine.Pos.z) < 1.5f && Mathf.Abs(float.Parse(t[2]) - mine.Pos.y) < 1.5f;
                         if (ok && sT - sRemoteAt < 1f) { Check("landing ship flew in and landed in the same place on the joiner", true, $"state host {mine.State} joiner {t[0]}"); Next(); }
                         else Timeout(60, "landing ship position on the joiner");
@@ -346,7 +348,10 @@ namespace PlanetbaseCoop
                     if (First())
                     {
                         sModulesBefore = Module.getCount();
-                        sClientSpot = FindFreeSpot("ModuleTypeWaterExtractor", 0, sM1 != null ? sM1.getPosition() : sBase, 18f);
+                        // margin: the joiner checks the spot against its own mirrored world a moment later, and the
+                        // colony ship's animated door collider can sit a fraction of a metre off there
+                        sClientSpot = FindFreeSpot("ModuleTypeWaterExtractor", 0, sM1 != null ? sM1.getPosition() : sBase, 18f, margin: 3f);
+                        Log.Info($"bot: joiner spot {sClientSpot}; ships {string.Join(", ", Registry.Ships.Select(s => s.getId() + " state " + ShipRec.From(s).State))}; host ship colliders: {PlacementDiag.Ships(sClientSpot)}");
                         SendProbe("do", $"place-module ModuleTypeWaterExtractor 0 {sClientSpot.x:F2} {sClientSpot.z:F2}");
                         return;
                     }
@@ -376,7 +381,15 @@ namespace PlanetbaseCoop
                     else Timeout(10, "joiner's speed change reaches the host");
                     break;
                 case 10: // T6: construction progress mirrors (colonists build the new modules for real)
-                    if (First()) { ForceProgressAll(0.5f); return; }
+                    if (First())
+                    {
+                        ForceProgressAll(0.5f);
+                        // what the game does when a module's builder walks away (Buildable.tick): back to
+                        // Placed, progress kept. The joiner must still show the progress.
+                        var idle = Registry.Constructions.OfType<Module>().FirstOrDefault(m => m.getModuleType() is ModuleTypeSolarPanel && !m.isBuilt());
+                        if (idle != null) { Registry.SetState(idle, BuildableState.Placed); Log.Info($"bot: module {idle.getId()} left half-built (Placed, 0.5)"); }
+                        return;
+                    }
                     if (WaitProgressMatch(20f)) Next();
                     break;
                 case 11: // T7: colonists move on the joiner like on the host
@@ -384,8 +397,12 @@ namespace PlanetbaseCoop
                     if (WaitCharsMatch(60f)) Next();
                     break;
                 case 12: // T8: resources (positions and holders) match after the host moves one and stores another
+                    // The host is paused for this step: colonists otherwise haul the two resources away
+                    // within seconds, and carried resources also reach the joiner through the colonist
+                    // records, so a slow check could pass without resource records at all.
                     if (First())
                     {
+                        Singleton<TimeManager>.getInstance().pause();
                         Registry.Collect(Kind.Resource, sScratch);
                         var ground = sScratch.Values.Cast<Resource>().Where(x => { ResourcePlaces.Where(x, out var h, out _, out _); return h == Holder.None && x.getState() == Resource.State.Idle; }).ToList();
                         sMoved = ground.FirstOrDefault();
@@ -394,10 +411,15 @@ namespace PlanetbaseCoop
                         var slot = sStorage?.findStorageSlot(sStorage.getPosition());
                         if (sStored != null && slot != null) slot.addResource(sStored);
                         Log.Info($"bot: moved resource {sMoved?.getId()}, stored {sStored?.getId()} (slot {(slot != null)})");
-                        if (sMoved == null || sStored == null || slot == null) { Check("resource test setup (2 loose resources, a storage slot)", false); Finish(); }
+                        if (sMoved == null || sStored == null || slot == null) { Check("resource test setup (2 loose resources, a storage slot)", false); Finish(); return; }
+                        sResExpect = ParseEntries(Get(LocalDigest(), "res"));   // what the host just set
                         return;
                     }
-                    if (sStepT > 1f && WaitResourcesMatch(30f, sMoved.getId(), sStored.getId())) Next();
+                    if (sStepT > 0.5f && WaitResourcesMatch(10f, sMoved.getId(), sStored.getId()))
+                    {
+                        Singleton<TimeManager>.getInstance().unpause();
+                        Next();
+                    }
                     break;
                 case 13: // T9: census repairs a missing object (drop one on the joiner on purpose)
                     if (First()) { SendProbe("do", "drop-a-resource"); return; }
@@ -493,6 +515,9 @@ namespace PlanetbaseCoop
             return false;
         }
 
+        private static float sResLogT = -10f;
+        private static Dictionary<string, string[]> sResExpect;
+
         private static bool WaitResourcesMatch(float timeout, params int[] mustMatch)
         {
             var mine = ParseEntries(Get(LocalDigest(), "res"));
@@ -509,11 +534,25 @@ namespace PlanetbaseCoop
             }
             foreach (var id in mustMatch)
             {
-                // the two resources the host just moved/stored: the joiner must show the new place
+                // the two resources the host just moved/stored: the joiner must show exactly the state the
+                // host set (and the host must still have it)
                 if (!theirs.TryGetValue(id.ToString(), out var t) || !mine.TryGetValue(id.ToString(), out var m)) { off++; continue; }
+                if (sResExpect != null && sResExpect.TryGetValue(id.ToString(), out var e) && string.Join(":", e) != string.Join(":", m))
+                {
+                    off++; example = example ?? $"host's {id} changed since the test set it ({string.Join(":", e)} -> {string.Join(":", m)})";
+                    continue;
+                }
                 if (t[0] != m[0] || t[1] != m[1] || t[2] != m[2] || Mathf.Abs(float.Parse(t[3]) - float.Parse(m[3])) > 0.5f || Mathf.Abs(float.Parse(t[4]) - float.Parse(m[4])) > 0.5f) off++;
             }
-            if (mine.Count > 0 && off == 0 && sT - sRemoteAt < 1f) { Check("resources have the same holder and place", true, mine.Count + " resources, incl. one moved and one stored by the host"); return true; }
+            bool pass = mine.Count > 0 && off == 0 && sT - sRemoteAt < 1f;
+            if (pass || sStepT >= timeout || sStepT - sResLogT >= 2f)
+            {
+                // the two resources this check is about, as each side sees them
+                sResLogT = sStepT;
+                Log.Info("res check t=" + sStepT.ToString("F1") + " off=" + off + ": " + string.Join(" | ", mustMatch.Select(id =>
+                    $"{id} host {(mine.TryGetValue(id.ToString(), out var m) ? string.Join(":", m) : "-")} joiner {(theirs.TryGetValue(id.ToString(), out var t) ? string.Join(":", t) : "-")}")));
+            }
+            if (pass) { Check("resources have the same holder and place", true, mine.Count + " resources, incl. one moved and one stored by the host"); return true; }
             if (sStepT >= timeout) { Check("resources have the same holder and place", false, $"{off} of {mine.Count} off, e.g. {example}"); return true; }
             return false;
         }
@@ -539,7 +578,7 @@ namespace PlanetbaseCoop
             return p;
         }
 
-        private static Vector3 FindFreeSpot(string typeName, int size, Vector3 near, float minDist)
+        private static Vector3 FindFreeSpot(string typeName, int size, Vector3 near, float minDist, float margin = 0f)
         {
             var type = TypeList<ModuleType, ModuleTypeList>.find(typeName);
             size = Mathf.Clamp(size, type.getMinSize(), type.getMaxSize());
@@ -553,7 +592,11 @@ namespace PlanetbaseCoop
                         float ang = a * Mathf.PI * 2f / 24f;
                         var p = new Vector3(near.x + Mathf.Cos(ang) * r, floor, near.z + Mathf.Sin(ang) * r);
                         probe.setPosition(p);
-                        if (probe.canPlaceModule(p, Vector3.up, Module.ValidSizes[size])) return p;
+                        if (!probe.canPlaceModule(p, Vector3.up, Module.ValidSizes[size])) continue;
+                        float half = Module.ValidSizes[size] * 0.5f;
+                        // same checks as canPlaceModule (ships: layer 16, size/2 + 10 m; resources: layer 10, size/2 + 2 m), wider
+                        if (margin > 0f && (Physics.CheckSphere(p, half + 10f + margin, 65536) || Physics.CheckSphere(p, half + 2f + margin, 1024))) continue;
+                        return p;
                     }
             }
             finally { probe.destroy(); }
@@ -680,6 +723,7 @@ namespace PlanetbaseCoop
                     // what tryPlaceModule leaves behind: a preview module, valid, then the click commits it
                     var preview = Module.create(pos, size, type);
                     preview.setValidPosition(preview.canPlaceModule(pos, Vector3.up, Module.ValidSizes[size]));
+                    Log.Info("bot: preview valid on the joiner: " + preview.isValidPosition() + $"; ships {string.Join(", ", Registry.Ships.Select(s => s.getId() + " state " + ShipRec.From(s).State))}; joiner ship colliders: {PlacementDiag.Ships(pos)}");
                     fActiveModule.SetValue(game, preview);
                     mPlaceModule.Invoke(game, null);
                     break;
@@ -719,6 +763,8 @@ namespace PlanetbaseCoop
                 {
                     var rb = Singleton<LandingShipManager>.getInstance().getLandingPermissions().getMerchantRefBool();
                     rb.set(!rb.get());   // what the window's checkbox does
+                    Settings.TestReplayHostResend();   // and the host's 5 s re-send lands before our next check
+                    Log.Info("bot: merchants toggled to " + rb.get() + " (after the host's re-send)");
                     break;
                 }
                 case "drop-a-resource":

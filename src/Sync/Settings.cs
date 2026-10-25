@@ -12,9 +12,12 @@ namespace PlanetbaseCoop.Sync
     {
         private static Dictionary<string, int> sLastSent;       // host
         private static Dictionary<string, int> sLastApplied;    // joiner
-        private static float sTimer, sKeyTimer;
+        // joiner: edits sent to the host and not yet confirmed by it (key -> value, time sent)
+        private static readonly Dictionary<string, (int value, float at)> sPending = new Dictionary<string, (int, float)>();
+        private const float PendingFor = 5f;
+        private static float sTimer, sKeyTimer, sClock;
 
-        public static void Reset() { sLastSent = null; sLastApplied = null; }
+        public static void Reset() { sLastSent = null; sLastApplied = null; sPending.Clear(); }
 
         public static Dictionary<string, int> Read()
         {
@@ -90,27 +93,63 @@ namespace PlanetbaseCoop.Sync
             foreach (var p in peers) t.Send(p, msg);
         }
 
-        // joiner: host values arrived
+        // joiner: host values arrived. The host re-sends everything every 5 s, so this can land
+        // between a player's click and the next edit check: send that edit first, and don't
+        // overwrite a key the joiner changed until the host confirms it (or PendingFor passes).
         public static void OnSettings(BinaryReader r)
         {
             var d = ReadMap(r);
-            foreach (var kv in d) Apply(kv.Key, kv.Value);
+            sLastHostMap = d;
+            ApplyHostMap(d);
+        }
+
+        private static Dictionary<string, int> sLastHostMap;
+
+        // test bots: the host's periodic re-send arriving right after a joiner's click (worst timing)
+        public static void TestReplayHostResend()
+        {
+            if (sLastHostMap != null) ApplyHostMap(sLastHostMap);
+        }
+
+        private static void ApplyHostMap(Dictionary<string, int> d)
+        {
+            bool flush = !TestEnv.Mut("no-edit-flush");
+            if (flush) SendLocalEdits();
+            foreach (var kv in d)
+            {
+                if (flush && sPending.TryGetValue(kv.Key, out var p))
+                {
+                    if (p.value == kv.Value || sClock - p.at > PendingFor) sPending.Remove(kv.Key);
+                    else continue;   // the host has not processed our edit yet
+                }
+                if (!TestEnv.Mut("no-settings")) Apply(kv.Key, kv.Value);
+            }
             sLastApplied = Read();
         }
 
         // joiner, every frame: did the player edit something?
         public static void ClientTick(float dt)
         {
+            sClock += dt;
             if (sLastApplied == null) return;
             sTimer += dt;
             if (sTimer < 0.5f) return;
             sTimer = 0f;
+            SendLocalEdits();
+        }
+
+        // joiner: values that differ from what the host last sent were edited here; send them
+        private static void SendLocalEdits()
+        {
+            if (sLastApplied == null) return;
             var now = Read();
             var changed = new Dictionary<string, int>();
             foreach (var kv in now)
                 if (!sLastApplied.TryGetValue(kv.Key, out int old) || old != kv.Value) changed[kv.Key] = kv.Value;
             if (changed.Count == 0) return;
             sLastApplied = now;
+            foreach (var kv in changed) sPending[kv.Key] = (kv.Value, sClock);
+            Log.Info("settings edited here: " + string.Join(", ", changed.Keys));
             Commands.Send(Cmd.Settings, w => Write(w, changed));
         }
 

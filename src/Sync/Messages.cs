@@ -52,6 +52,7 @@ namespace PlanetbaseCoop.Sync
 
         public static void OnMessage(BinaryReader r)
         {
+            if (TestEnv.Mut("no-notices")) return;
             string desc = r.ReadString(), iconName = r.ReadString();
             byte kind = r.ReadByte();
             int targetId = r.ReadInt32();

@@ -35,6 +35,7 @@ namespace PlanetbaseCoop.Sync
         public static List<Ship> Ships => (List<Ship>)fShips.GetValue(null);
 
         public static BuildableState StateOf(Buildable b) => (BuildableState)fBuildState.GetValue(b);
+        public static void SetState(Buildable b, BuildableState s) => fBuildState.SetValue(b, s);
 
         // Live, shareable objects of a kind (no placement previews, nothing destroyed).
         public static void Collect(Kind kind, Dictionary<int, object> into)

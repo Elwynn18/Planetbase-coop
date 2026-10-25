@@ -3,7 +3,7 @@ using System.IO;
 
 namespace PlanetbaseCoop
 {
-    // Test switches come from environment variables set by test/run.sh. With none set the
+    // Test switches come from environment variables set by test/lab.py. With none set the
     // mod behaves exactly as for players.
     public static class TestEnv
     {

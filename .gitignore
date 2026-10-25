@@ -4,3 +4,4 @@ src/obj/
 src/bin/
 *.log
 test/lab.json
+__pycache__/

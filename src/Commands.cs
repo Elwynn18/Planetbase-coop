@@ -82,6 +82,7 @@ namespace PlanetbaseCoop
             }
             else
             {
+                Log.Info($"placement refused on this joiner ({m.getModuleType().GetType().Name} at {m.getPosition()}): {PlacementDiag.Why(m, m.getPosition())}");
                 Singleton<AudioPlayer>.getInstance().play(SoundList.getInstance().ButtonClickWrong);
             }
             m.destroy();   // the real module comes back from the host with the host's id

@@ -9,15 +9,25 @@ Rules this follows (coop-anything playbook):
 - never write to the owner's install or Steam folders; check them after every run;
 - each copy has its own Proton prefix (own saves, own wineserver) and no steamclient.dll, so it
   cannot reach the owner's Steam client; the mod also blocks SteamAPI.Init in test mode;
-- copies run windowed and muted on a private Xvfb screen (never on the owner's desktop); the
-  launcher refuses to start without Xvfb. Rendering is WineD3D on Mesa's software GL, since the
-  owner's NVIDIA Vulkan driver cannot present to Xvfb;
-- only processes in our own prefixes are killed (wineserver -k per prefix).
+- copies never open a window on the owner's desktop: each runs inside its own gamescope with the
+  headless backend (its own Xwayland, rendered on the GPU through DXVK, nothing presented). The
+  launcher refuses to start without gamescope, strips DISPLAY/WAYLAND_DISPLAY/XAUTHORITY, gives each
+  copy a private XDG_RUNTIME_DIR (so not even the desktop's Wayland, PipeWire or Pulse sockets are
+  reachable), and stops a copy if gamescope does not confirm the headless backend.
+  Xvfb does not work for this game (software GL never draws a second frame; NVIDIA can't present);
+- gamescope 3.17 segfaults whenever it shuts down by itself (child exit or SIGTERM), which wakes the
+  desktop's crash handler. So its child never exits on its own (a wrapper records the game's exit
+  code, then sleeps) and the lab ends each copy with SIGKILL on its process group. Core dumps are
+  off for the whole tree;
+- only our own processes are killed: wineserver -k per prefix, then our process groups, then any
+  process still carrying this copy's COOP_LAB_COPY marker.
 """
 import hashlib
 import json
 import os
+import resource
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -32,6 +42,8 @@ BASE = Path(CONF.get("base_install", LOCAL / "test-install" / "Planetbase"))
 BEPINEX = Path(CONF.get("bepinex", LOCAL / "downloads" / "bepinex-5.4.23.5" / "extracted"))
 LAB = Path(CONF.get("lab_dir", LOCAL / "lab"))
 PFX_ROOT = Path(CONF.get("prefix_dir", os.environ.get("COOP_PREFIX_DIR", LAB / "prefixes")))
+# private XDG_RUNTIME_DIR per copy; short, because Unix socket paths are limited to 107 bytes
+RT_ROOT = Path(CONF.get("runtime_dir", f"/tmp/pbcoop-rt-{os.getuid()}"))
 PROTON = Path(CONF.get("proton", Path.home() / ".local/share/Steam/steamapps/common/Proton 9.0 (Beta)"))
 SNIPER = Path(CONF.get("sniper", Path.home() / ".local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper"))
 PROTECTED = CONF.get("protected", {})
@@ -169,40 +181,29 @@ def wineserver_kill(name):
         subprocess.call([str(ws), "-k"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-class VirtualScreen:
-    """A private Xvfb display for the game copies of one run."""
-
-    def __init__(self):
-        if not shutil.which("Xvfb"):
-            sys.exit("refusing to run: Xvfb is not installed (test copies must not open windows on the owner's desktop)")
-        self.num = None
-        for n in range(91, 140):
-            if not os.path.exists(f"/tmp/.X11-unix/X{n}") and not os.path.exists(f"/tmp/.X{n}-lock"):
-                self.num = n
-                break
-        if self.num is None:
-            sys.exit("no free X display number")
-        self.proc = subprocess.Popen(["Xvfb", f":{self.num}", "-screen", "0", "1280x1024x24", "-nolisten", "tcp", "-noreset"],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        if not wait_for(lambda: os.path.exists(f"/tmp/.X11-unix/X{self.num}"), 10):
-            self.stop()
-            sys.exit("Xvfb did not start")
-        log(f"Xvfb on :{self.num} (pid {self.proc.pid})")
-
-    @property
-    def display(self):
-        return f":{self.num}"
-
-    def stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+GAMESCOPE = None
+# what the owner's desktop session uses; a copy must never see any of these
+DESKTOP_ENV = {k: os.environ.get(k) for k in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR")}
 
 
-SCREEN = None
+def require_gamescope():
+    """Copies only ever run inside a headless gamescope. No gamescope, no run."""
+    global GAMESCOPE
+    gs = CONF.get("gamescope") or shutil.which("gamescope")
+    if not gs or not os.access(gs, os.X_OK):
+        sys.exit("refusing to run: gamescope is not installed (test copies must not open windows on the owner's desktop)")
+    out = subprocess.run([gs, "--version"], capture_output=True, text=True)
+    ver = next((l.split("version", 1)[1].split()[0] for l in (out.stdout + out.stderr).splitlines() if "version" in l), "unknown")
+    helps = subprocess.run([gs, "--help"], capture_output=True, text=True)
+    if "headless" not in helps.stdout + helps.stderr:
+        sys.exit(f"refusing to run: gamescope {ver} has no headless backend")
+    GAMESCOPE = gs
+    log(f"gamescope {ver} (headless backend)")
+
+
+def no_core_dumps():
+    # child side of Popen: no core files and no crash-handler popups for anything in a copy's tree
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 def to_windows(path):
@@ -218,20 +219,24 @@ class Copy:
         self.status = self.run_dir / "status.txt"
         self.coop_log = self.run_dir / "coop.log"
         self.player_log = self.run_dir / "player.log"
-        self.proton_log = self.run_dir / "proton.log"
+        self.launch_log = self.run_dir / "launch.log"     # gamescope + sniper + Proton output
+        self.exit_file = self.run_dir / "exit.txt"        # the game's exit code, written by the wrapper
+        self.width, self.height = width, height
+        self.marker = f"{name}@{LAB}"
+        self.runtime = RT_ROOT / name
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("SteamAppId", "SteamGameId", "SteamOverlay", "STEAM_", "PROTON_", "WINE", "DXVK", "COOP_",
-                                    "WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"))}
+                                    "WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
+                                    "PULSE_", "PIPEWIRE_", "DBUS_SESSION_BUS_ADDRESS"))}
         env.update({
-            "DISPLAY": SCREEN.display,              # private Xvfb, never the owner's desktop
+            # gamescope sets DISPLAY for the game to its own Xwayland; the desktop's is never passed on
+            "XDG_RUNTIME_DIR": str(self.runtime),
+            "COOP_LAB_COPY": self.marker,
+            # GPU rendering is fine inside gamescope; cheap settings keep four copies light
+            "COOP_LOWGFX": os.environ.get("COOP_LOWGFX", "1"),
         })
-        if os.environ.get("COOP_RENDERER", "dxvk") == "wined3d":
-            # software OpenGL on Xvfb: measured far too slow for Planetbase 1.4 (no second frame in 10 min)
-            env.update({"PROTON_USE_WINED3D": "1", "__GLX_VENDOR_LIBRARY_NAME": "mesa", "LIBGL_ALWAYS_SOFTWARE": "1"})
-        env.update({
-            "COOP_LOWGFX": "1",
-            "COOP_NORENDER": "1",                   # software GL is far too slow for the game's renderer
-        })
+        if os.environ.get("COOP_NORENDER") == "1":
+            env["COOP_NORENDER"] = "1"              # optional: cameras draw nothing
         env.update({
             "STEAM_COMPAT_DATA_PATH": str(pfx_dir(name)),
             "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(fake_steam_dir()),
@@ -258,18 +263,51 @@ class Copy:
 
     def start(self):
         pfx_dir(self.name).mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(self.runtime, ignore_errors=True)
+        self.runtime.mkdir(parents=True, mode=0o700)
+        os.chmod(RT_ROOT, 0o700)
+        if len(str(self.runtime)) > 80:
+            sys.exit(f"runtime dir path too long for sockets: {self.runtime}")
         exe = inst_dir(self.name) / "Planetbase.exe"
         # Proton 9 must run inside the Steam Linux Runtime (sniper) container, as Steam does:
         # run bare on this host the game hangs single-threaded right after winex11.drv loads.
-        args = [str(SNIPER / "_v2-entry-point"), "--verb=waitforexitandrun", "--",
+        game = [str(SNIPER / "_v2-entry-point"), "--verb=waitforexitandrun", "--",
                 str(PROTON / "proton"), "waitforexitandrun", str(exe),
-                "-screen-fullscreen", "0", "-screen-width", self.env["COOP_WIDTH"], "-screen-height", self.env["COOP_HEIGHT"],
+                "-screen-fullscreen", "0", "-screen-width", str(self.width), "-screen-height", str(self.height),
                 "-logFile", to_windows(self.player_log)]
-        log(f"start {self.name} mode={self.mode}")
-        with open(self.proton_log, "w") as out:
+        # gamescope's child must not exit by itself (gamescope would segfault): record and sleep
+        wrapper = 'echo "child DISPLAY=$DISPLAY WAYLAND_DISPLAY=$WAYLAND_DISPLAY"; "$@"; echo $? > "$COOP_EXIT_FILE"; exec sleep 86400'
+        args = [GAMESCOPE, "--backend", "headless",
+                "-w", str(self.width), "-h", str(self.height), "-W", str(self.width), "-H", str(self.height),
+                "-r", "30", "--", "sh", "-c", wrapper, "sh"] + game
+        env = dict(self.env, COOP_EXIT_FILE=str(self.exit_file))
+        log(f"start {self.name} mode={self.mode} (gamescope headless)")
+        with open(self.launch_log, "w") as out:
             # cwd must NOT be the game folder: inside the container that gives c0000135 (DLL not found)
-            self.proc = subprocess.Popen(args, env=self.env, cwd=str(LAB), stdout=out, stderr=subprocess.STDOUT,
-                                         start_new_session=True)
+            self.proc = subprocess.Popen(args, env=env, cwd=str(LAB), stdout=out, stderr=subprocess.STDOUT,
+                                         start_new_session=True, preexec_fn=no_core_dumps)
+        if not self.confirm_headless():
+            self.stop()
+            sys.exit(f"refusing to continue: gamescope for {self.name} did not confirm a headless backend; see {self.launch_log}")
+
+    def confirm_headless(self):
+        """gamescope must say it started the headless backend, and the wrapper must see its own DISPLAY."""
+        def seen():
+            t = self.launch_log.read_text(errors="replace") if self.launch_log.exists() else ""
+            return "Starting headless backend" in t and "child DISPLAY=" in t
+        if not wait_for(lambda: seen() or not self.alive(), 30) or not seen():
+            log(f"{self.name}: no headless confirmation in launch.log")
+            return False
+        text = self.launch_log.read_text(errors="replace")
+        line = next(l for l in text.splitlines() if l.startswith("child DISPLAY="))
+        disp = line.split()[1].split("=", 1)[1]
+        wl = line.split("WAYLAND_DISPLAY=", 1)[1].strip()
+        if not disp or disp == DESKTOP_ENV["DISPLAY"] or wl:
+            log(f"{self.name}: child sees DISPLAY={disp!r} WAYLAND_DISPLAY={wl!r} (desktop has {DESKTOP_ENV['DISPLAY']!r})")
+            return False
+        self.display = disp
+        log(f"{self.name}: headless gamescope, game display {disp}")
+        return True
 
     def lines(self):
         try:
@@ -284,19 +322,58 @@ class Copy:
         return None
 
     def alive(self):
-        return self.proc is not None and self.proc.poll() is None
+        """The game is running: gamescope is up and the wrapper has not recorded an exit code."""
+        return self.proc is not None and self.proc.poll() is None and not self.exit_file.exists()
+
+    def exit_code(self):
+        try:
+            return self.exit_file.read_text().strip()
+        except FileNotFoundError:
+            return None if self.proc is None or self.proc.poll() is None else f"gamescope died ({self.proc.returncode})"
 
     def stop(self):
         wineserver_kill(self.name)
         if self.proc and self.proc.poll() is None:
+            # SIGKILL only: gamescope segfaults on any other way out
             try:
-                os.killpg(self.proc.pid, 15)
+                os.killpg(self.proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            self.proc.wait(10)
+        kill_marked(self.marker)
+        shutil.rmtree(self.runtime, ignore_errors=True)
+
+
+def marked_pids(marker):
+    want = f"COOP_LAB_COPY={marker}".encode()
+    pids = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                if want in f.read().split(b"\0"):
+                    pids.append(int(pid))
+        except OSError:
+            pass
+    return pids
+
+
+def kill_marked(marker):
+    """Anything left from this copy (it carries our marker in its environment)."""
+    for _ in range(3):
+        pids = marked_pids(marker)
+        if not pids:
+            return
+        for p in pids:
             try:
-                self.proc.wait(10)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.proc.pid, 9)
+                os.kill(p, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.5)
+    left = marked_pids(marker)
+    if left:
+        log(f"WARNING: processes of {marker} still alive: {left}")
 
 
 def tail(path, n=25):
@@ -307,14 +384,6 @@ def tail(path, n=25):
 
 
 def run_copies(copies, timeout):
-    try:
-        return _run_copies(copies, timeout)
-    finally:
-        if SCREEN:
-            SCREEN.stop()
-
-
-def _run_copies(copies, timeout):
     if owner_game_running():
         sys.exit("refusing to run: the owner's own Planetbase is running")
     if not check_protected():
@@ -338,7 +407,7 @@ def _run_copies(copies, timeout):
             if dead:
                 time.sleep(3)
                 if not dead[0].result():
-                    log(f"{dead[0].name} exited without a result (exit code {dead[0].proc.returncode})")
+                    log(f"{dead[0].name} exited without a result (exit code {dead[0].exit_code()})")
                     break
             time.sleep(1)
     finally:
@@ -351,6 +420,7 @@ def _run_copies(copies, timeout):
         if "PASS" not in results[c.name]:
             log(f"coop.log tail:\n{tail(c.coop_log)}")
             log(f"player.log tail:\n{tail(c.player_log)}")
+            log(f"launch.log tail:\n{tail(c.launch_log, 15)}")
     protected_ok = check_protected()
     passed = all("PASS" in r for r in results.values()) and protected_ok
     print("RESULT: PASS" if passed else "RESULT: FAIL", flush=True)
@@ -382,8 +452,7 @@ def main(argv):
         opts = dict(a.split("=", 1) for a in argv[3:] if "=" in a)
         names = [a for a in argv[3:] if "=" not in a]
         timeout = int(opts.pop("timeout", "240"))
-        global SCREEN
-        SCREEN = VirtualScreen()
+        require_gamescope()
         if what == "boot":
             ok = run_copies([Copy(names[0], "boot")], timeout)
         elif what == "pair":
